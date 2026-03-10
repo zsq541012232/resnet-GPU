@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import time
 import os
 
-# 现代 PyTorch GPU 性能优化
 torch.backends.cudnn.benchmark = True
 
 
@@ -17,31 +16,42 @@ def train():
     for d in save_dirs:
         os.makedirs(d, exist_ok=True)
 
-    data_dir = "../dataset/def-onf-if/imgData3-r06-35"
-    weight_path = "./weights/resnet34-333f7ec4.pth"
-    num_modes = 35
+    # ==========================================
+    # --- 1. 参数配置 ---
+    # ==========================================
+    # data_dir = "../dataset/def-onf-if/imgData3-r06-35"  # 仿真数据路径
+    data_dir = "../dataset/def-onf-if/AIAOtestdata-real/data"  # 真实数据路径
+    weight_path = "./weights/resnet34-333f7ec4.pth"   # 骨架网络权重
+    num_modes = 35  # 统一控制项数
     epochs = 50
     batch_size = 32
+
+    # 【新增配置】选择 "old" 或 "new"(old为仿真，new为真实)
+    # dataset_format = "old"
+    dataset_format = "new"
+
+
+    # 注意：如果是真实数据，不能包含 "imgNedf"，只支持 "imgIF" 和 "imgPoDF"
     # prefixes = ["imgNedf", "imgIF", "imgPoDF"]
     # prefixes = ["imgIF", "imgPoDF"]
     prefixes = ["imgIF"]
 
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f">>> Using Device: {device}")
+    print(f">>> Using Device: {device} | Format: {dataset_format} | Modes: {num_modes}")
 
     # 1. 数据处理
     train_idx, val_idx, _ = split_dataset(data_dir)
-    z_mean, z_std = compute_zernike_stats(data_dir, train_idx)
+    # 传入 dataset_format 和 num_modes
+    z_mean, z_std = compute_zernike_stats(data_dir, train_idx, dataset_format, num_modes)
     torch.save({'mean': z_mean, 'std': z_std}, './logs/stats.pth')
     print(">>> Statistics saved to 'stats.pth'.")
 
     # 2. 实例化 DataLoader
     print(">>> Loading datasets...")
-    train_dataset = ZernikeDataset(data_dir, train_idx, z_mean, z_std, prefixes=prefixes)
-    val_dataset = ZernikeDataset(data_dir, val_idx, z_mean, z_std, prefixes=prefixes)
+    # 传入 dataset_format 和 num_modes
+    train_dataset = ZernikeDataset(data_dir, train_idx, z_mean, z_std, prefixes, dataset_format, num_modes)
+    val_dataset = ZernikeDataset(data_dir, val_idx, z_mean, z_std, prefixes, dataset_format, num_modes)
 
-    # 如果在 Windows 环境下 num_workers 报错，可以改为 0
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4,
                                                pin_memory=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4,
@@ -51,22 +61,18 @@ def train():
     print(">>> Initializing ZernikeNet (ResNet34 + CBAM)...")
     model = ZernikeNet(num_outputs=num_modes, in_channels=len(prefixes), weight_path=weight_path).to(device)
 
-    # 使用 AdamW 替代 Adam
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
     criterion = torch.nn.MSELoss()
 
-    # 使用 OneCycleLR 调度器 (内置 Warmup + Cosine Annealing)
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=1e-3,  # 预热达到的最高学习率
+        max_lr=1e-3,
         steps_per_epoch=len(train_loader),
         epochs=epochs,
-        pct_start=0.1  # 前 10% 的 steps 用于 Warmup
+        pct_start=0.1
     )
 
-    history = {
-        'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': []
-    }
+    history = {'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': []}
 
     print(">>> [Step 3] Starting GPU training loop...")
     for epoch in range(epochs):
@@ -85,7 +91,7 @@ def train():
             loss = criterion(outputs, targets)
             loss.backward()
             optimizer.step()
-            scheduler.step()  # 注意：OneCycleLR 必须在 batch 结束后 step
+            scheduler.step()
 
             train_running_loss += loss.item()
             current_lr = optimizer.param_groups[0]['lr']
@@ -106,7 +112,6 @@ def train():
 
         avg_val_loss = val_running_loss / len(val_loader)
 
-        # 保存记录
         history['epoch'].append(epoch + 1)
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
