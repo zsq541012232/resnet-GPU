@@ -1,8 +1,10 @@
+from sys import prefix
+
 import torch
 import torch.optim as optim
 from tqdm import tqdm
 from data_utils import split_dataset, compute_zernike_stats, ZernikeDataset
-from model import ZernikeNet
+from model import ZernikeNet, ZernikeViT, ZernikeEffNet
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
@@ -19,38 +21,34 @@ def train():
     # ==========================================
     # --- 1. 参数配置 ---
     # ==========================================
-    # data_dir = "../dataset/def-onf-if/imgData3-r06-35"  # 仿真数据路径
-    data_dir = "../dataset/def-onf-if/AIAOtestdata-real/data"  # 真实数据路径
-    weight_path = "./weights/resnet34-333f7ec4.pth"   # 骨架网络权重
-    num_modes = 35  # 统一控制项数
+    data_dir = "../dataset/def-onf-if/imgData-r6-z15"  # 仿真数据路径
+    # weight_path = "./weights/resnet34-333f7ec4.pth"   # 骨架网络权重
+    weight_path = './weights/vit_b_16-c867db91.pth'
+    num_modes = 15  # 统一控制项数
     epochs = 50
     batch_size = 32
+    channel_num = 3
 
-    # 【新增配置】选择 "old" 或 "new"(old为仿真，new为真实)
-    # dataset_format = "old"
-    dataset_format = "new"
-
-
-    # 注意：如果是真实数据，不能包含 "imgNedf"，只支持 "imgIF" 和 "imgPoDF"
-    # prefixes = ["imgNedf", "imgIF", "imgPoDF"]
-    # prefixes = ["imgIF", "imgPoDF"]
-    prefixes = ["imgIF"]
+    if 1 == channel_num:
+        prefixes = ['imgIF']
+    elif 2 == channel_num:
+        prefixes = [ "imgIF", "imgPoDF"]
+    elif 3 == channel_num:
+        prefixes = ["imgNedf", "imgIF", "imgPoDF"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f">>> Using Device: {device} | Format: {dataset_format} | Modes: {num_modes}")
+    print(f">>> Using Device: {device} | Modes: {num_modes}")
 
     # 1. 数据处理
     train_idx, val_idx, _ = split_dataset(data_dir)
-    # 传入 dataset_format 和 num_modes
-    z_mean, z_std = compute_zernike_stats(data_dir, train_idx, dataset_format, num_modes)
+    z_mean, z_std = compute_zernike_stats(data_dir, train_idx, num_modes)
     torch.save({'mean': z_mean, 'std': z_std}, './logs/stats.pth')
     print(">>> Statistics saved to 'stats.pth'.")
 
     # 2. 实例化 DataLoader
     print(">>> Loading datasets...")
-    # 传入 dataset_format 和 num_modes
-    train_dataset = ZernikeDataset(data_dir, train_idx, z_mean, z_std, prefixes, dataset_format, num_modes)
-    val_dataset = ZernikeDataset(data_dir, val_idx, z_mean, z_std, prefixes, dataset_format, num_modes)
+    train_dataset = ZernikeDataset(data_dir, train_idx, z_mean, z_std, prefixes, num_modes)
+    val_dataset = ZernikeDataset(data_dir, val_idx, z_mean, z_std, prefixes, num_modes)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4,
                                                pin_memory=True)
@@ -59,7 +57,11 @@ def train():
 
     # 3. 初始化模型、优化器与调度器
     print(">>> Initializing ZernikeNet (ResNet34 + CBAM)...")
-    model = ZernikeNet(num_outputs=num_modes, in_channels=len(prefixes), weight_path=weight_path).to(device)
+    # model = ZernikeNet(num_outputs=num_modes, in_channels=len(prefixes), weight_path=weight_path).to(device)
+    print(">>> Initializing ZernikeNet (vit_b_16)")
+    model = ZernikeViT(num_outputs=num_modes, in_channels=len(prefixes), weight_path=weight_path).to(device)
+    print(">>> Initializing ZernikeEffNet (EfficientNet-B3)")
+    # model = ZernikeEffNet(num_outputs=num_modes,in_channels=len(prefixes), weight_path=weight_path).to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
     criterion = torch.nn.MSELoss()
