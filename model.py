@@ -177,6 +177,201 @@ class ZernikeEffNet(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+
+
+
+# ====================== RoPE 辅助函数 ======================
+def rotate_half(x):
+    """RoPE 旋转操作"""
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+class RotaryEmbedding(nn.Module):
+    """1D RoPE"""
+    def __init__(self, dim, base=10000):
+        super().__init__()
+        self.dim = dim
+        self.base = base
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+    def forward(self, seq_len, device):
+        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        return emb.cos(), emb.sin()
+
+
+class RoPEAttention(nn.Module):
+    """带 RoPE 的 Multi-Head Self-Attention（替换原来的 nn.MultiheadAttention）"""
+    def __init__(self, dim, num_heads=12, qkv_bias=False):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.proj = nn.Linear(dim, dim)
+        self.rope = RotaryEmbedding(self.head_dim)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+
+        # === 应用 RoPE ===
+        cos, sin = self.rope(N, x.device)
+        cos = cos.unsqueeze(0).unsqueeze(0)
+        sin = sin.unsqueeze(0).unsqueeze(0)
+
+        q = q * cos + rotate_half(q) * sin
+        k = k * cos + rotate_half(k) * sin
+
+        # Attention 计算
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        return x
+
+
+# ====================== Kimi Block AttnRes（保持不变） ======================
+class BlockAttnRes(nn.Module):
+    """Kimi Block Attention Residuals"""
+    def __init__(self, dim):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.proj = nn.Linear(dim, 1, bias=False)
+
+    def forward(self, blocks: list, partial: torch.Tensor):
+        V = torch.stack(blocks + [partial])
+        K = self.norm(V)
+        logits = self.proj(K).squeeze(-1)
+        weights = F.softmax(logits, dim=0)
+        h = torch.einsum('n b t, n b t d -> b t d', weights, V)
+        return h
+
+
+# ====================== 带 RoPE 的 Kimi AttnRes Block ======================
+class AttnResTransformerBlockRoPE(nn.Module):
+    """Kimi AttnRes + RoPE Attention"""
+    def __init__(self, dim, num_heads, mlp_ratio=4.0, block_size=4, layer_idx=0):
+        super().__init__()
+        self.layer_number = layer_idx
+        self.block_size = block_size
+
+        self.attn_res = BlockAttnRes(dim)
+        self.mlp_res = BlockAttnRes(dim)
+
+        self.attn_norm = nn.LayerNorm(dim)
+        self.mlp_norm = nn.LayerNorm(dim)
+
+        # 使用 RoPE Attention
+        self.attn = RoPEAttention(dim, num_heads=num_heads)
+
+        mlp_hidden = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_hidden),
+            nn.GELU(),
+            nn.Linear(mlp_hidden, dim)
+        )
+
+    def forward(self, blocks: list, hidden_states: torch.Tensor):
+        partial_block = hidden_states
+
+        # 1. AttnRes before self-attention
+        h = self.attn_res(blocks, partial_block)
+
+        # 块边界判断（Kimi 原逻辑）
+        if self.layer_number % (self.block_size // 2) == 0:
+            blocks.append(partial_block.detach())
+            partial_block = None
+
+        # 2. Self-Attention（带 RoPE）
+        attn_out = self.attn(self.attn_norm(h))
+
+        partial_block = partial_block + attn_out if partial_block is not None else attn_out
+
+        # 3. AttnRes before MLP
+        h = self.mlp_res(blocks, partial_block)
+
+        # 4. MLP
+        mlp_out = self.mlp(self.mlp_norm(h))
+        partial_block = partial_block + mlp_out
+
+        return blocks, partial_block
+
+
+# ====================== 新模型：ZernikeViTAttnResRoPE ======================
+class ZernikeViTAttnResRoPE(nn.Module):
+    def __init__(self, num_outputs, in_channels=3, weight_path=None,
+                 patch_size=16, embed_dim=768, depth=12, num_heads=12, block_size=4):
+        super().__init__()
+
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+
+        # Patch Embedding
+        self.patch_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size,
+                                     stride=patch_size, bias=False)
+
+        # Class Token
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        # Kimi AttnRes + RoPE Blocks
+        self.layers = nn.ModuleList([
+            AttnResTransformerBlockRoPE(embed_dim, num_heads, mlp_ratio=4.0,
+                                        block_size=block_size, layer_idx=i)
+            for i in range(depth)
+        ])
+
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_outputs)
+
+        # 权重加载提示
+        if weight_path and os.path.exists(weight_path):
+            print(f"    ⚠️  ZernikeViTAttnResRoPE 使用 Kimi AttnRes + RoPE，无法加载标准 ViT 权重 → 从零初始化")
+        else:
+            print(f"    ZernikeViTAttnResRoPE 从零初始化（ViT + Kimi AttnRes + RoPE）")
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.zeros_(m.bias)
+            nn.init.ones_(m.weight)
+
+    def forward(self, x):
+        B = x.shape[0]
+
+        # Patch Embedding
+        x = self.patch_embed(x).flatten(2).transpose(1, 2)
+
+        # 添加 class token
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        # Kimi AttnRes 初始化
+        blocks = [x]
+        hidden = x
+
+        # 逐层前向（携带 blocks 列表 + RoPE）
+        for blk in self.layers:
+            blocks, hidden = blk(blocks, hidden)
+
+        # 最终输出
+        hidden = self.norm(hidden)
+        cls_feat = hidden[:, 0]
+        return self.head(cls_feat)
     
 
 
