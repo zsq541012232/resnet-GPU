@@ -3,6 +3,33 @@ import torch.nn as nn
 from torchvision import models
 import os
 
+
+class SignWeightedMSELoss(nn.Module):
+    """
+    兼顾符号一致性与均方误差的新型 Loss。
+    当预测值与真实值符号相反时，给予额外的惩罚权重。
+    """
+
+    def __init__(self, penalty_weight=10.0):
+        super(SignWeightedMSELoss, self).__init__()
+        self.penalty_weight = penalty_weight
+        self.mse = nn.MSELoss(reduction='none')
+
+    def forward(self, pred, target):
+        # 计算基础 MSE (保留每一个元素的独立 loss)
+        base_loss = self.mse(pred, target)
+
+        # 判断符号是否一致：正数*正数>0，负数*负数>0，符号相反相乘<0
+        # 注意：如果某一项真实值为 0，则不计算符号惩罚
+        sign_match = torch.sign(pred) * torch.sign(target)
+
+        # 对于符号相反的地方，施加 penalty_weight 倍的惩罚
+        weight = torch.where(sign_match < 0, self.penalty_weight, 1.0)
+
+        # 返回加权后的平均 Loss
+        return torch.mean(base_loss * weight)
+
+
 class CBAM(nn.Module):
     def __init__(self, gate_channels, reduction_ratio=16):
         super(CBAM, self).__init__()
@@ -150,3 +177,8 @@ class ZernikeEffNet(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+    
+
+
+
+    

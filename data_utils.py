@@ -22,6 +22,13 @@ def split_dataset(data_dir, test_size=0.1, val_size=0.1):
     return train_idx, val_idx, test_idx
 
 
+# 新增：直接从固定文件夹获取所有样本索引 (需求4)
+def get_indices_from_dir(data_dir):
+    csv_files = glob.glob(os.path.join(data_dir, "Zernike*.csv"))
+    indices = [int(os.path.basename(f).replace("Zernike", "").replace(".csv", "")) for f in csv_files]
+    return indices
+
+
 def load_zernike_coeffs(filepath, num_modes=35):
     df = pd.read_csv(filepath, header=None)
     # 展平后截取指定项数
@@ -47,17 +54,52 @@ def compute_zernike_stats(data_dir, train_idx, num_modes=35):
     return mean, std
 
 
+# 修改：去除了 z_mean 和 z_std (需求1)
 class ZernikeDataset(Dataset):
-    def __init__(self, data_dir, indices, z_mean=None, z_std=None, prefixes=["imgNedf", "imgIF", "imgPodf"], num_modes=35):
+    def __init__(self, data_dir, indices, prefixes=["imgIF"], num_modes=35):
         self.data_dir = data_dir
         self.indices = indices
-        self.z_mean = z_mean
-        self.z_std = z_std
         self.prefixes = prefixes
         self.num_modes = num_modes
         self.transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Resize((224, 224), antialias=True),  # 标准的 vit_b_16 模型默认要求输入图像的尺寸为 224x224
+            transforms.Resize((224, 224), antialias=True),
+        ])
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        file_idx = self.indices[idx]
+        imgs = []
+        for prefix in self.prefixes:
+            # 兼容大小写差异
+            img_path = os.path.join(self.data_dir, f"{prefix}{file_idx}.jpg")
+            if not os.path.exists(img_path) and prefix.lower() == "imgnedf":
+                img_path = os.path.join(self.data_dir, f"imgNedf{file_idx}.jpg")
+
+            img = Image.open(img_path).convert('L')
+            imgs.append(np.array(img))
+
+        stacked = np.stack(imgs, axis=-1)
+        img_tensor = self.transform(stacked)
+
+        coeff_path = os.path.join(self.data_dir, f"Zernike{file_idx}.csv")
+        coeffs = load_zernike_coeffs(coeff_path, self.num_modes)
+        # 去除正则化步骤
+        return img_tensor, torch.FloatTensor(coeffs)
+
+
+# 新增：固定 3 通道补零输入逻辑 (需求5)
+class ZernikeDatasetFixed3Channel(Dataset):
+    def __init__(self, data_dir, indices, input_types=["imgIF"], num_modes=35):
+        self.data_dir = data_dir
+        self.indices = indices
+        self.input_types = input_types  # 当前实际传入的图像类型，例如 ["imgIF", "imgPoDF"]
+        self.num_modes = num_modes
+        self.transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Resize((224, 224), antialias=True),
         ])
 
     def __len__(self):
@@ -67,25 +109,36 @@ class ZernikeDataset(Dataset):
         file_idx = self.indices[idx]
         imgs = []
 
-        # 解析图像路径
-        for prefix in self.prefixes:
-            img_path = os.path.join(self.data_dir, f"{prefix}{file_idx}.jpg")
-            img = Image.open(img_path).convert('L')
-            imgs.append(np.array(img))
+        # 通道 1: imgIF (默认存在，放在首位)
+        img_if_path = os.path.join(self.data_dir, f"imgIF{file_idx}.jpg")
+        img_if = np.array(Image.open(img_if_path).convert('L'))
+        imgs.append(img_if)
 
-        # 早期融合
+        # 通道 2: imgPoDF 或 全0
+        if "imgPoDF" in self.input_types:
+            img_podf_path = os.path.join(self.data_dir, f"imgPoDF{file_idx}.jpg")
+            img_podf = np.array(Image.open(img_podf_path).convert('L'))
+        else:
+            img_podf = np.zeros_like(img_if)
+        imgs.append(img_podf)
+
+        # 通道 3: imgNeDF 或 全0
+        if "imgNeDF" in self.input_types or "imgNedf" in self.input_types:
+            img_nedf_path = os.path.join(self.data_dir, f"imgNeDF{file_idx}.jpg")
+            if not os.path.exists(img_nedf_path):
+                img_nedf_path = os.path.join(self.data_dir, f"imgNedf{file_idx}.jpg")
+            img_nedf = np.array(Image.open(img_nedf_path).convert('L'))
+        else:
+            img_nedf = np.zeros_like(img_if)
+        imgs.append(img_nedf)
+
+        # 始终 stack 成 3 个通道
         stacked = np.stack(imgs, axis=-1)
         img_tensor = self.transform(stacked)
 
-        # 读取泽尼克系数
         coeff_path = os.path.join(self.data_dir, f"Zernike{file_idx}.csv")
         coeffs = load_zernike_coeffs(coeff_path, self.num_modes)
-        coeffs = torch.FloatTensor(coeffs)
-
-        if self.z_mean is not None:
-            coeffs = (coeffs - self.z_mean) / (self.z_std + 1e-8)
-
-        return img_tensor, coeffs
+        return img_tensor, torch.FloatTensor(coeffs)
 
 
 def visualize_sample(dataset, idx=0):
