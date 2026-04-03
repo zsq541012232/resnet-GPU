@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torchvision import models
 import os
+import torch.nn.functional as F
 
 
 class SignWeightedMSELoss(nn.Module):

@@ -3,7 +3,7 @@ import torch.optim as optim
 from tqdm import tqdm
 # 注意导入新加的类和函数
 from data_utils import split_dataset, get_indices_from_dir, ZernikeDataset, ZernikeDatasetFixed3Channel
-from model import ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss
+from model import ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss, ZernikeViTAttnResRoPE
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
@@ -78,7 +78,8 @@ def train():
     # ==========================================
     print(">>> Initializing ZernikeViT...")
     # model = ZernikeViT(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # vit
-    model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # resnet+cbam
+    # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # resnet+cbam
+    model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)
 
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
