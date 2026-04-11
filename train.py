@@ -23,8 +23,8 @@ def train():
     # ==========================================
     # 策略开关
     use_fixed_dirs = False  # 需求4: True表示使用分离的独立文件夹，False表示使用原本的比例切分
-    use_sign_loss = False  # 需求2: True表示使用关注正负号的自研Loss，False表示使用标准MSE
-    use_fixed_3channel = True  # 需求5: True表示开启固定3通道补零模式，False表示使用原有多通道模式
+    use_sign_loss = True  # 需求2: True表示使用关注正负号的自研Loss，False表示使用标准MSE
+    use_fixed_3channel = False  # 需求5: True表示开启固定3通道补零模式，False表示使用原有多通道模式
 
     train_dir = "../dataset/train_data" if use_fixed_dirs else "../dataset/def-onf-if/imgData-rr-z48"
     val_dir = "../dataset/val_data" if use_fixed_dirs else None
@@ -32,7 +32,7 @@ def train():
     weight_path = './weights/resnet34-333f7ec4.pth'   # resnet+cbam
     # weight_path = './weights/vit_b_16-c867db91.pth'   # vit
     num_modes = 35
-    epochs = 50
+    epochs = 200
     batch_size = 32
 
     # 这里的 prefixes 现在只代表“你想输入的信息种类”
@@ -92,8 +92,18 @@ def train():
         criterion = torch.nn.MSELoss()
         print(">>> Criterion: Standard MSELoss")
 
-    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-3, steps_per_epoch=len(train_loader), epochs=epochs,
-                                              pct_start=0.1)
+    # scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-3, steps_per_epoch=len(train_loader), epochs=epochs,
+    #                                           pct_start=0.1)
+    
+    # 使用 CosineAnnealingWarmRestarts 实现每 50 个 epoch 的学习率脉冲重启
+    # T_0 是第一次重启的步数（因为 scheduler.step() 是在 batch 循环里调用的，所以要乘以 len(train_loader)）
+    steps_per_cycle = 50 * len(train_loader) 
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=steps_per_cycle,
+        T_mult=1,        # 每次重启后的周期长度倍数（设为1表示一直是50个epoch）
+        eta_min=1e-6     # 退火到的最小学习率
+    )
 
     # 训练记录扩展了正负号错误率统计
     history = {'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': [], 'val_sign_err_sample': [],
@@ -164,8 +174,15 @@ def train():
 
         pd.DataFrame(history).to_csv("./logs/training_log.csv", index=False)
 
-        if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), f"./weights/model_epoch_{epoch + 1}.pth")
+        # if (epoch + 1) % 10 == 0:
+        #     torch.save(model.state_dict(), f"./weights/model_epoch_{epoch + 1}.pth")
+
+    # ==========================================
+    # --- for 循环结束，只在最后保存一次模型 ---
+    # ==========================================
+    final_weight_path = f"./weights/model_final_epoch_{epochs}.pth"
+    torch.save(model.state_dict(), final_weight_path)
+    print(f">>> 训练完毕！最终模型权重已保存至: {final_weight_path}")
 
     plot_history(history)
 
@@ -182,7 +199,7 @@ def plot_history(history):
     ax1.grid(True)
 
     ax2.plot(history['epoch'], history['lr'], label='Learning Rate', color='orange')
-    ax2.set_title('Learning Rate Schedule (Warmup + Cosine)')
+    ax2.set_title('Learning Rate Schedule (Cosine Warm Restarts)')
     ax2.set_xlabel('Epochs')
     ax2.set_ylabel('Learning Rate')
     ax2.legend()

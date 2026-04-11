@@ -4,7 +4,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
 from data_utils import split_dataset, get_indices_from_dir, ZernikeDataset, ZernikeDatasetFixed3Channel
-from model import ZernikeNet, ZernikeViT, ZernikeEffNet
+from model import ZernikeNet, ZernikeViT, ZernikeEffNet, ZernikeViTAttnResRoPE
 import pandas as pd
 import os
 from sklearn.metrics import r2_score, mean_squared_error
@@ -56,7 +56,9 @@ def test_and_plot():
 
     # --- 2. 加载模型 ---
     # model = ZernikeViT(num_outputs=num_modes, in_channels=model_in_channels).to(device)   # vit
-    model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels).to(device)   # resnet+cbam
+    # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels).to(device)   # resnet+cbam
+    model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels).to(device)
+
 
     model_weight_path = "./weights/model_epoch_50.pth"
     if os.path.exists(model_weight_path):

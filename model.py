@@ -11,7 +11,7 @@ class SignWeightedMSELoss(nn.Module):
     当预测值与真实值符号相反时，给予额外的惩罚权重。
     """
 
-    def __init__(self, penalty_weight=10.0):
+    def __init__(self, penalty_weight=2.0):
         super(SignWeightedMSELoss, self).__init__()
         self.penalty_weight = penalty_weight
         self.mse = nn.MSELoss(reduction='none')
