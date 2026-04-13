@@ -1,6 +1,9 @@
 **ZernikeNet：基于物理信息引导的 Siamese ViT 模型，从多通道 PSF 图像预测 Zernike 系数**
 
 **项目版本**：v1.0（2026 年 4 月）  
+**作者**：SiqiZhou
+**仓库**：（请自行上传至 GitHub / GitLab）
+
 ---
 
 ### 项目简介
