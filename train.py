@@ -138,7 +138,7 @@ def train():
             for imgs, targets in vbar:
                 imgs, targets = imgs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
                 outputs = model(imgs)
-                loss = criterion(outputs, targets)  # 验证集保持计算 Loss 趋势
+                loss = criterion(outputs, targets, imgs) if use_physics_loss else criterion(outputs, targets)
                 val_running_loss += loss.item()
 
                 val_all_preds.append(outputs.cpu().numpy())
