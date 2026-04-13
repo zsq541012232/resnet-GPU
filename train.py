@@ -1,9 +1,10 @@
 import torch
 import torch.optim as optim
 from tqdm import tqdm
-# 注意导入新加的类和函数
 from data_utils import split_dataset, get_indices_from_dir, ZernikeDataset, ZernikeDatasetFixed3Channel
-from model import ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss, ZernikeViTAttnResRoPE
+from model import (ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss,
+                   ZernikeSiameseViTAttnResRoPE, PhysicsInformedLoss,
+                   compute_zernike_basis)   # 新增导入
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
@@ -23,9 +24,11 @@ def train():
     # ==========================================
     # 策略开关
     use_fixed_dirs = False  # 需求4: True表示使用分离的独立文件夹，False表示使用原本的比例切分
-    use_sign_loss = True  # 需求2: True表示使用关注正负号的自研Loss，False表示使用标准MSE
     use_fixed_3channel = False  # 需求5: True表示开启固定3通道补零模式，False表示使用原有多通道模式
-
+    use_physics_loss = True          # 强烈推荐保持开启
+    sign_penalty = 10.0
+    recon_weight = 0.4
+    
     train_dir = "../dataset/train_data" if use_fixed_dirs else "../dataset/def-onf-if/imgData-rr-z48"
     val_dir = "../dataset/val_data" if use_fixed_dirs else None
 
@@ -57,14 +60,9 @@ def train():
         data_dir_train, data_dir_val = train_dir, train_dir
 
     print(">>> Loading datasets...")
-    if use_fixed_3channel:
-        DatasetClass = ZernikeDatasetFixed3Channel
-        model_in_channels = 3  # 始终为3通道
-    else:
-        DatasetClass = ZernikeDataset
-        model_in_channels = len(prefixes)
+    DatasetClass = ZernikeDatasetFixed3Channel if use_fixed_3channel else ZernikeDataset
+    model_in_channels = 3 if use_fixed_3channel else len(prefixes)
 
-    # 去除了 z_mean 和 z_std
     train_dataset = DatasetClass(data_dir_train, train_idx, prefixes, num_modes)
     val_dataset = DatasetClass(data_dir_val, val_idx, prefixes, num_modes)
 
@@ -80,6 +78,16 @@ def train():
     # model = ZernikeViT(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # vit
     # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # resnet+cbam
     model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)
+    # model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+  
+    if use_physics_loss:
+        criterion = PhysicsInformedLoss(sign_penalty=sign_penalty, recon_weight=recon_weight).to(device)
+        # 补全Zernike基底（自动调用上面新增的函数）
+        zernike_basis, pupil_mask = compute_zernike_basis(pupil_size=224, num_modes=num_modes)
+        criterion.set_psf_simulator(zernike_basis, pupil_mask)
+        print("    ✅ Zernike基底已加载到PhysicsInformedLoss")
+    else:
+        criterion = SignWeightedMSELoss(penalty_weight=sign_penalty)
 
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
@@ -122,7 +130,7 @@ def train():
             imgs, targets = imgs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
             optimizer.zero_grad()
             outputs = model(imgs)
-            loss = criterion(outputs, targets)
+            loss = criterion(outputs, targets, imgs) if use_physics_loss else  criterion(outputs, targets)
             loss.backward()
             optimizer.step()
             scheduler.step()
