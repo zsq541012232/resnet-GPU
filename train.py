@@ -15,6 +15,7 @@ torch.backends.cudnn.benchmark = True
 
 
 def train():
+    best_val_loss = float('inf')
     save_dirs = ['weights', 'logs', 'results']
     for d in save_dirs:
         os.makedirs(d, exist_ok=True)
@@ -164,16 +165,19 @@ def train():
               f"SignErr(Item)={item_error_ratio:.1%}, Time={epoch_end - epoch_start:.1f}s")
 
         pd.DataFrame(history).to_csv("./logs/training_log.csv", index=False)
-
+        # 在 epoch 循环末尾加
+        if avg_val_loss < best_val_loss:   
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), "./weights/model_best.pth")
         # if (epoch + 1) % 10 == 0:
         #     torch.save(model.state_dict(), f"./weights/model_epoch_{epoch + 1}.pth")
 
     # ==========================================
     # --- for 循环结束，只在最后保存一次模型 ---
     # ==========================================
-    final_weight_path = f"./weights/model_final_epoch_{epochs}.pth"
-    torch.save(model.state_dict(), final_weight_path)
-    print(f">>> 训练完毕！最终模型权重已保存至: {final_weight_path}")
+    # final_weight_path = f"./weights/model_final_epoch_{epochs}.pth"
+    # torch.save(model.state_dict(), final_weight_path)
+    # print(f">>> 训练完毕！最终模型权重已保存至: {final_weight_path}")
 
     plot_history(history)
 
