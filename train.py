@@ -183,24 +183,44 @@ def train():
 
 
 def plot_history(history):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    """
+    训练曲线可视化（新增 Sign Error 曲线）
+    """
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))   # 改成 1×3
 
-    ax1.plot(history['epoch'], history['train_loss'], label='Train Loss (MSE)')
-    ax1.plot(history['epoch'], history['val_loss'], label='Val Loss (MSE)')
-    ax1.set_title('Training and Validation Loss')
+    # ==================== 左侧：Loss 曲线 ====================
+    ax1.plot(history['epoch'], history['train_loss'], label='Train Loss (MSE)', color='#1f77b4')
+    ax1.plot(history['epoch'], history['val_loss'], label='Val Loss (MSE)', color='#ff7f0e')
+    ax1.set_title('Training and Validation Loss', fontsize=14)
     ax1.set_xlabel('Epochs')
     ax1.set_ylabel('Loss (MSE)')
     ax1.legend()
-    ax1.grid(True)
+    ax1.grid(True, linestyle=':', alpha=0.7)
 
+    # ==================== 中间：Learning Rate ====================
     ax2.plot(history['epoch'], history['lr'], label='Learning Rate', color='orange')
-    ax2.set_title('Learning Rate Schedule (OneCycleLR)')
+    ax2.set_title('Learning Rate Schedule (OneCycleLR)', fontsize=14)
     ax2.set_xlabel('Epochs')
     ax2.set_ylabel('Learning Rate')
     ax2.legend()
-    ax2.grid(True)
+    ax2.grid(True, linestyle=':', alpha=0.7)
 
-    plt.savefig('./results/training_curves.png', dpi=300)
+    # ==================== 右侧：新增 Sign Error 曲线 ====================
+    ax3.plot(history['epoch'], history['val_sign_err_item'], 
+             label='Val Sign Error Ratio', color='red', linewidth=2.5)
+    ax3.set_title('Validation Sign Error Ratio', fontsize=14)
+    ax3.set_xlabel('Epochs')
+    ax3.set_ylabel('Sign Error Ratio')
+    ax3.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.1%}'))  # 显示百分比
+    ax3.legend()
+    ax3.grid(True, linestyle=':', alpha=0.7)
+
+    # 整体美化
+    plt.suptitle('Zernike Coefficient Training Progress', fontsize=16, y=1.02)
+    plt.tight_layout()
+    
+    # 保存高清图
+    plt.savefig('./results/training_curves.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 
