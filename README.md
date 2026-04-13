@@ -138,7 +138,6 @@ python test.py
 
 1. **立即可做的改进**：
    - 将 `use_fixed_3channel=True` 时的 Siamese 模型适配完成（当前抛出 NotImplementedError），让 3 通道（imgIF + imgPoDF + imgNeDF）也支持孪生结构。
-   - 在 `data_utils.py` 增加随机旋转、翻转、Gaussian 噪声等**数据增强**，进一步提升泛化能力。
    - 集成 **Weights & Biases (wandb)** 实时记录 Loss、Sign Error 和 PSF 重建质量。
 
 2. **中长期优化方向**：
