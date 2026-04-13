@@ -54,6 +54,131 @@ class CBAM(nn.Module):
         out = out * self.sa(spatial)
         return out
 
+
+# ====================== 【新增】Zernike基底预计算函数 ======================
+def compute_zernike_basis(pupil_size=224, num_modes=35):
+    """
+    计算标准ANSI/OSA排序的Zernike基底（归一化到圆形光瞳）。
+    返回可直接用于PhysicsInformedLoss的torch张量。
+    """
+    print(f">>> [compute_zernike_basis] 生成 {num_modes} 个Zernike模式，尺寸 {pupil_size}×{pupil_size}...")
+    
+    coords = np.linspace(-1, 1, pupil_size)
+    X, Y = np.meshgrid(coords, coords)
+    R = np.sqrt(X**2 + Y**2)
+    Theta = np.arctan2(Y, X)
+    mask = (R <= 1.0).astype(np.float32)
+
+    def radial_poly(n, m, rho):
+        if m > n or (n - m) % 2 != 0:
+            return np.zeros_like(rho)
+        R = np.zeros_like(rho)
+        for k in range(0, (n - m) // 2 + 1):
+            coeff = (-1)**k * factorial(n - k) / (
+                factorial(k) * factorial((n + m) // 2 - k) * factorial((n - m) // 2 - k)
+            )
+            R += coeff * (rho ** (n - 2 * k))
+        return R
+
+    basis = []
+    n = 0
+    while len(basis) < num_modes:
+        for m in range(-n, n + 1, 2):
+            if len(basis) >= num_modes:
+                break
+            if m == 0:
+                Z = np.sqrt(n + 1) * radial_poly(n, 0, R) * mask
+            else:
+                m_abs = abs(m)
+                trig = np.cos(m_abs * Theta) if m > 0 else np.sin(m_abs * Theta)
+                Z = np.sqrt(2 * (n + 1)) * radial_poly(n, m_abs, R) * trig * mask
+            
+            # 归一化（使基底在光瞳内正交）
+            area = np.sum(mask)
+            if area > 0:
+                Z /= np.sqrt(np.sum(Z**2) / area)
+            basis.append(Z)
+        n += 1
+
+    basis_np = np.stack(basis[:num_modes], axis=0)          # (num_modes, H, W)
+    zernike_basis = torch.from_numpy(basis_np).float()
+    pupil_mask = torch.from_numpy(mask).float()
+
+    print(f"    ✓ 成功生成 {num_modes} 个Zernike模式（含活塞/倾斜/离焦等）")
+    return zernike_basis, pupil_mask
+
+
+# ====================== 【核心修改】真正的Twin/Siamese结构 ======================
+class SiameseEncoder(nn.Module):
+    """共享权重的单分支编码器（原ViT+AttnRes+RoPE的核心部分）"""
+    def __init__(self, in_channels=1, patch_size=16, embed_dim=768, depth=12, num_heads=12, block_size=4):
+        super().__init__()
+        self.patch_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.layers = nn.ModuleList([
+            AttnResTransformerBlockRoPE(embed_dim, num_heads, mlp_ratio=4.0, block_size=block_size, layer_idx=i)
+            for i in range(depth)
+        ])
+        self.norm = nn.LayerNorm(embed_dim)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.zeros_(m.bias)
+            nn.init.ones_(m.weight)
+
+    def forward(self, x):   # x: (B, 1, H, W)
+        B = x.shape[0]
+        x = self.patch_embed(x).flatten(2).transpose(1, 2)
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        blocks = [x]
+        hidden = x
+        for blk in self.layers:
+            blocks, hidden = blk(blocks, hidden)
+        hidden = self.norm(hidden)
+        return hidden[:, 0]   # (B, embed_dim) 全局特征
+
+
+class ZernikeSiameseViTAttnResRoPE(nn.Module):
+    """
+    真正的Twin/Siamese结构（强烈推荐用于[在焦 + 正离焦]输入）
+    - 两个完全共享权重的分支分别处理imgIF和imgPoDF
+    - 特征融合后输出Zernike系数
+    """
+    def __init__(self, num_outputs, patch_size=16, embed_dim=768, depth=12, num_heads=12, block_size=4):
+        super().__init__()
+        self.encoder = SiameseEncoder(in_channels=1, patch_size=patch_size,
+                                      embed_dim=embed_dim, depth=depth,
+                                      num_heads=num_heads, block_size=block_size)
+        # 特征融合层
+        self.fusion = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+        self.head = nn.Linear(embed_dim, num_outputs)
+        print("    ✅ ZernikeSiameseViTAttnResRoPE 初始化完成（Twin结构，已共享权重）")
+
+    def forward(self, x):   # x: (B, 2, H, W)
+        if x.shape[1] != 2:
+            raise ValueError("Siamese模型要求输入正好2个通道 (imgIF + imgPoDF)")
+        img_if = x[:, 0:1, :, :]     # (B,1,H,W)
+        img_podf = x[:, 1:2, :, :]   # (B,1,H,W)
+        feat_if = self.encoder(img_if)
+        feat_podf = self.encoder(img_podf)
+        fused = torch.cat([feat_if, feat_podf], dim=1)
+        fused = self.fusion(fused)
+        return self.head(fused)
+
+
+
 class ZernikeNet(nn.Module):
     def __init__(self, num_outputs, in_channels=3, weight_path=None):
         super(ZernikeNet, self).__init__()
@@ -375,6 +500,76 @@ class ZernikeViTAttnResRoPE(nn.Module):
         return self.head(cls_feat)
     
 
+# ====================== 【新增】可微PSF前向模拟器 + Physics-Informed Loss ======================
+class DifferentiablePSFSimulator(nn.Module):
+    """
+    可微PSF前向模型（用于物理重建Loss）。
+    """
+    def __init__(self, pupil_size=224, num_modes=35):
+        super().__init__()
+        self.pupil_size = pupil_size
+        self.num_modes = num_modes
+        self.zernike_basis = None   # (num_modes, H, W)
+        self.pupil_mask = None      # (H, W)
 
+    def set_basis(self, zernike_basis, pupil_mask):
+        self.zernike_basis = zernike_basis.to(self.device if hasattr(self, 'device') else 'cpu')
+        self.pupil_mask = pupil_mask.to(self.device if hasattr(self, 'device') else 'cpu')
+        self.to(self.zernike_basis.device)
+
+    def zernike_to_phase(self, coeffs):
+        if self.zernike_basis is None:
+            raise RuntimeError("请先调用 set_basis() 传入Zernike基底")
+        phase = torch.einsum('bm, mhw -> bhw', coeffs, self.zernike_basis)
+        phase = phase * self.pupil_mask.unsqueeze(0)
+        return phase
+
+    def forward(self, coeffs, defocus_rad=0.0):
+        B = coeffs.shape[0]
+        phase = self.zernike_to_phase(coeffs)
+        if defocus_rad != 0.0:
+            y, x = torch.meshgrid(
+                torch.linspace(-1, 1, self.pupil_size, device=phase.device),
+                torch.linspace(-1, 1, self.pupil_size, device=phase.device),
+                indexing='ij'
+            )
+            r2 = x**2 + y**2
+            phase = phase + defocus_rad * (2 * r2 - 1)
+
+        pupil = self.pupil_mask.unsqueeze(0).unsqueeze(0) * torch.exp(1j * phase)
+        psf = torch.abs(torch.fft.fftshift(torch.fft.fft2(pupil.squeeze(1)))) ** 2
+        psf = psf / (psf.sum(dim=[1, 2], keepdim=True) + 1e-8)
+        return psf.squeeze(1)   # (B, H, W)
+
+
+class PhysicsInformedLoss(nn.Module):
+    """
+    核心Loss：符号加权MSE + 可微物理重建Loss
+    强制网络输出的Zernike必须能同时完美重建「在焦 + 正离焦」两张PSF → 符号歧义被彻底消除
+    """
+    def __init__(self, sign_penalty=10.0, recon_weight=0.4, defocus_rad=1.0):
+        super().__init__()
+        self.sign_loss = SignWeightedMSELoss(penalty_weight=sign_penalty)
+        self.recon_weight = recon_weight
+        self.defocus_rad = defocus_rad
+        self.psf_sim = DifferentiablePSFSimulator()
+
+    def set_psf_simulator(self, zernike_basis, pupil_mask):
+        self.psf_sim.set_basis(zernike_basis, pupil_mask)
+
+    def forward(self, pred, target, input_psfs=None):
+        z_loss = self.sign_loss(pred, target)
+        if input_psfs is None or self.psf_sim.zernike_basis is None:
+            return z_loss
+
+        batch_size = pred.shape[0]
+        recon_loss = 0.0
+        for b in range(batch_size):
+            sim_if = self.psf_sim(pred[b:b+1], defocus_rad=0.0)
+            sim_podf = self.psf_sim(pred[b:b+1], defocus_rad=self.defocus_rad)
+            recon_loss += F.mse_loss(sim_if, input_psfs[b, 0].unsqueeze(0)) + \
+                          F.mse_loss(sim_podf, input_psfs[b, 1].unsqueeze(0))
+        recon_loss = recon_loss / batch_size
+        return z_loss + self.recon_weight * recon_loss
 
     
