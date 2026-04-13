@@ -69,10 +69,14 @@ def train():
     # --- 3. 模型与损失函数初始化 ---
     # ==========================================
     print(">>> Initializing ZernikeViT...")
-    # model = ZernikeViT(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # vit
-    # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # resnet+cbam
-    # model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)
-    model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+ 
+    if use_fixed_3channel:
+        # model = ZernikeViT(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # vit
+        # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # resnet+cbam
+        # model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels).to(device)
+        raise NotImplementedError("3通道模式暂未适配 Siamese 模型")
+    else:
+        model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
   
     if use_physics_loss:
         criterion = PhysicsInformedLoss(sign_penalty=sign_penalty,
