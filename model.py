@@ -3,6 +3,8 @@ import torch.nn as nn
 from torchvision import models
 import os
 import torch.nn.functional as F
+import numpy as np                    
+from math import factorial  
 
 
 class SignWeightedMSELoss(nn.Module):
@@ -557,7 +559,7 @@ class PhysicsInformedLoss(nn.Module):
         recon_loss = 0.0
         for b in range(batch_size):
             # 始终计算在焦重建
-            sim_if = self.psf_sim(pred[b:b+1], defocus_rad=0.0)
+            sim_if = self.psf_sim(pred[b:b+1])
             mse_if = F.mse_loss(sim_if, input_psfs[b, 0].unsqueeze(0))
             recon_loss += mse_if
             
