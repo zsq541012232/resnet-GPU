@@ -18,8 +18,7 @@ def test_and_plot():
     # ==========================================
     # --- 1. 参数配置 ---
     # ==========================================
-    use_fixed_dirs = False  # 保持与 train.py 配置对应
-    use_fixed_3channel = True  # 保持与 train.py 配置对应
+    use_fixed_3channel = False  # 保持与 train.py 配置对应
 
     test_dir = "../dataset/test_data" if use_fixed_dirs else "../dataset/def-onf-if/imgData-rr-z48"
     num_modes = 35
@@ -36,12 +35,8 @@ def test_and_plot():
     os.makedirs(samples_dir, exist_ok=True)
 
     # 数据集准备
-    if use_fixed_dirs:
-        test_idx = get_indices_from_dir(test_dir)
-        data_dir_test = test_dir
-    else:
-        _, _, test_idx = split_dataset(test_dir)
-        data_dir_test = test_dir
+    _, _, test_idx = split_dataset(test_dir)
+    data_dir_test = test_dir
 
     if use_fixed_3channel:
         # 使用 input_types 指明实际传入的图像
@@ -110,7 +105,6 @@ def test_and_plot():
 
     # 符号一致性计算
     sign_mismatch = (np.sign(true_np) * np.sign(pred_np)) < 0
-    ratio_sample_err = np.mean(np.any(sign_mismatch, axis=1))
     ratio_item_err = np.sum(sign_mismatch) / sign_mismatch.size
 
     # --- 4. 核心计算、数据保存与汇总报告 ---
@@ -150,7 +144,6 @@ def test_and_plot():
         f"测试样本总数: {len(test_idx)}\n"
         f"平均 MSE: {avg_sample_mse:.6f}\n"
         f"平均 R2 : {avg_sample_r2:.6f}\n"
-        f"有符号错误的样本比例: {ratio_sample_err:.2%}\n"
         f"所有系数中符号错误的比例: {ratio_item_err:.2%}\n"
         f"平均单样本推理时延: {avg_latency_ms:.2f} ms\n"
         "========================================\n"
