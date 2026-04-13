@@ -527,14 +527,24 @@ class DifferentiablePSFSimulator(nn.Module):
         return phase
 
     def forward(self, coeffs):
-        B = coeffs.shape[0]
-        phase = self.zernike_to_phase(coeffs)
+        """向量化的可微 PSF 前向模拟（支持任意 batch size）"""
+        if self.zernike_basis is None:
+            raise RuntimeError("请先调用 set_basis() 传入Zernike基底")
         
-        pupil = self.pupil_mask.unsqueeze(0).unsqueeze(0) * torch.exp(1j * phase)
-        psf = torch.abs(torch.fft.fftshift(torch.fft.fft2(pupil.squeeze(1)))) ** 2
+        phase = self.zernike_to_phase(coeffs)                    # (B, H, W)
+        
+        # === 关键修复：正确的 batch-friendly pupil 构建 ===
+        pupil = torch.exp(1j * phase) * self.pupil_mask.unsqueeze(0)   # (B, H, W) complex
+        
+        # FFT 计算 PSF
+        fft_result = torch.fft.fft2(pupil)
+        fft_shifted = torch.fft.fftshift(fft_result)
+        psf = torch.abs(fft_shifted) ** 2                        # (B, H, W)
+        
+        # 每张 PSF 独立归一化（sum=1）
         psf = psf / (psf.sum(dim=[1, 2], keepdim=True) + 1e-8)
-        return psf.squeeze(1)   # (B, H, W)
-
+        
+        return psf                                               # (B, H, W)
 
 class PhysicsInformedLoss(nn.Module):
     """
@@ -551,22 +561,29 @@ class PhysicsInformedLoss(nn.Module):
         self.psf_sim.set_basis(zernike_basis, pupil_mask)
 
     def forward(self, pred, target, input_psfs=None):
+        """
+        向量化版本：
+        - sign_loss 保持不变
+        - recon_loss 一次性计算整个 batch（去掉 for-loop）
+        """
         z_loss = self.sign_loss(pred, target)
+
         if input_psfs is None or self.psf_sim.zernike_basis is None:
             return z_loss
 
-        batch_size = pred.shape[0]
-        recon_loss = 0.0
-        for b in range(batch_size):
-            sim_if = self.psf_sim(pred[b:b+1])                    # (1, H, W) 线性
-            # 把 input 反 log 回线性空间（近似）
-            target_if = torch.expm1(input_psfs[b, 0].unsqueeze(0).clamp(min=0))
-            # 归一化到 sum=1（和 sim_if 保持一致）
-            target_if = target_if / (target_if.sum() + 1e-8)
-            mse_if = F.mse_loss(sim_if, target_if)
-            recon_loss += mse_if
-            
-        recon_loss = recon_loss / batch_size
-        return z_loss + self.recon_weight * recon_loss
+        # ==================== 向量化的物理重建损失 ====================
+        # 1. 一次前向得到所有样本的模拟 in-focus PSF
+        sim_if = self.psf_sim(pred)                          # (B, H, W)
 
+        # 2. 把输入的 log1p(imgIF) 反变换回线性强度空间
+        target_if = torch.expm1(input_psfs[:, 0].clamp(min=0))   # (B, H, W)
+
+        # 3. 每张图像独立归一化（与 PSF 保持一致）
+        target_sum = target_if.sum(dim=[1, 2], keepdim=True) + 1e-8
+        target_if = target_if / target_sum
+
+        # 4. 计算 MSE（默认 reduction='mean'，等价于原来对每个样本求 mean 后再平均）
+        recon_loss = F.mse_loss(sim_if, target_if)
+
+        return z_loss + self.recon_weight * recon_loss
     
