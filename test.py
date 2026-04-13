@@ -4,7 +4,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
 from data_utils import split_dataset, get_indices_from_dir, ZernikeDataset, ZernikeDatasetFixed3Channel
-from model import ZernikeNet, ZernikeViT, ZernikeEffNet, ZernikeViTAttnResRoPE
+from model import ZernikeNet, ZernikeViT, ZernikeEffNet, ZernikeViTAttnResRoPE, ZernikeSiameseViTAttnResRoPE
 import pandas as pd
 import os
 from sklearn.metrics import r2_score, mean_squared_error
@@ -52,10 +52,11 @@ def test_and_plot():
     # --- 2. 加载模型 ---
     # model = ZernikeViT(num_outputs=num_modes, in_channels=model_in_channels).to(device)   # vit
     # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels).to(device)   # resnet+cbam
-    model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels).to(device)
+    # model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels).to(device)
+    model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)   # ← 不要传 in_channels
 
 
-    model_weight_path = "./weights/model_epoch_50.pth"
+    model_weight_path = "./weights/model_best.pth"
     if os.path.exists(model_weight_path):
         model.load_state_dict(torch.load(model_weight_path, map_location=device))
         print(f">>> 成功加载权重: {model_weight_path}")
