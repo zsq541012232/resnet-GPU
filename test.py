@@ -20,7 +20,7 @@ def test_and_plot():
     # ==========================================
     use_fixed_3channel = False  # 保持与 train.py 配置对应
 
-    test_dir = "../dataset/test_data" if use_fixed_dirs else "../dataset/def-onf-if/imgData-rr-z48"
+    test_dir = "../dataset/def-onf-if/imgData-rr-z48"
     num_modes = 35
     batch_size = 32
     # prefixes 定义了输入图像的类型和顺序
