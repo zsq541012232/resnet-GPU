@@ -239,38 +239,24 @@ def test_and_plot():
         plt.savefig(os.path.join(samples_dir, f"sample_{sample_id}_coeffs.png"), dpi=300)
         plt.close()
 
-        # --- [核心修改 2] 保存对应的 PSF 图像横向拼图 ---
+        # --- 保存对应的 PSF 图像横向拼图 ---
         # 提取图像数据 (C, H, W) -> (H, W, C) 用于 matplotlib 显示
         # 如果是单通道，squeeze 掉 C 通道
         img_data = imgs_np[i].transpose(1, 2, 0)  # (224, 224, C)
 
-        # 创建 1行2列 的子图用于拼接
-        fig_psf, axes_psf = plt.subplots(1, 3, figsize=(12, 4))
+        # --- 保存 PSF 拼图（支持 2 或 3 通道，动态子图）---
+        num_c = img_data.shape[-1]
+        fig_psf, axes_psf = plt.subplots(1, num_c, figsize=(6 * num_c, 4), squeeze=False)
+        axes_psf = axes_psf.flatten()
 
-        # 通道 0: imgIF (在焦)
-        if img_data.shape[-1] >= 1:
-            axes_psf[0].imshow(img_data[:, :, 0], cmap='gray')
-            axes_psf[0].set_title(f"In-Focus (imgIF)")
-        axes_psf[0].axis('off')  # 隐藏坐标轴
-
-        # 通道 1: imgPoDF (正离焦)
-        # 注意：如果是 Fixed3Channel 模式，imgPoDF 在通道 1，但在 data_utils 里如果 input_types 没写 imgPoDF，这里可能是全黑补零
-        if img_data.shape[-1] >= 2:
-            axes_psf[1].imshow(img_data[:, :, 1], cmap='gray')
-            axes_psf[1].set_title(f"Post-Defocus (imgPoDF)")
-        axes_psf[1].axis('off')
-
-        # 通道 2: imgNeDF (负离焦)
-        # 注意：如果是 Fixed3Channel 模式，imgPoDF 在通道 1，但在 data_utils 里如果 input_types 没写 imgPoDF，这里可能是全黑补零
-        if img_data.shape[-1] >= 3:
-            axes_psf[2].imshow(img_data[:, :, 1], cmap='gray')
-            axes_psf[2].set_title(f"Post-Defocus (imgNeDF)")
-        axes_psf[2].axis('off')
+        titles = ["In-Focus (imgIF)", "Post-Defocus (imgPoDF)", "Negative-Defocus (imgNeDF)"]
+        for c in range(num_c):
+            axes_psf[c].imshow(img_data[:, :, c], cmap='gray')
+            axes_psf[c].set_title(titles[c])
+            axes_psf[c].axis('off')
 
         plt.suptitle(f"PSF Images for Sample {sample_id}", fontsize=14)
-        plt.tight_layout(rect=[0, 0, 1, 0.95])  # 调整布局给 suptitle 留出空间
-
-        # 保存 PSF 拼图
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
         plt.savefig(os.path.join(samples_dir, f"sample_{sample_id}_psf.png"), dpi=300, bbox_inches='tight')
         plt.close(fig_psf)
 
