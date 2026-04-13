@@ -547,11 +547,12 @@ class PhysicsInformedLoss(nn.Module):
     核心Loss：符号加权MSE + 可微物理重建Loss
     强制网络输出的Zernike必须能同时完美重建「在焦 + 正离焦」两张PSF → 符号歧义被彻底消除
     """
-    def __init__(self, sign_penalty=10.0, recon_weight=0.4, defocus_rad=1.0):
+    def __init__(self, sign_penalty=10.0, recon_weight=0.4, defocus_rad=1.0, only_infocus_recon=True):
         super().__init__()
         self.sign_loss = SignWeightedMSELoss(penalty_weight=sign_penalty)
         self.recon_weight = recon_weight
         self.defocus_rad = defocus_rad
+        self.only_infocus_recon = only_infocus_recon  
         self.psf_sim = DifferentiablePSFSimulator()
 
     def set_psf_simulator(self, zernike_basis, pupil_mask):
@@ -565,10 +566,18 @@ class PhysicsInformedLoss(nn.Module):
         batch_size = pred.shape[0]
         recon_loss = 0.0
         for b in range(batch_size):
+            # 始终计算在焦重建
             sim_if = self.psf_sim(pred[b:b+1], defocus_rad=0.0)
-            sim_podf = self.psf_sim(pred[b:b+1], defocus_rad=self.defocus_rad)
-            recon_loss += F.mse_loss(sim_if, input_psfs[b, 0].unsqueeze(0)) + \
-                          F.mse_loss(sim_podf, input_psfs[b, 1].unsqueeze(0))
+            mse_if = F.mse_loss(sim_if, input_psfs[b, 0].unsqueeze(0))
+
+            if self.only_infocus_recon:
+                recon_loss += mse_if
+            else:
+                # 原来双图像重建逻辑
+                sim_podf = self.psf_sim(pred[b:b+1], defocus_rad=self.defocus_rad)
+                mse_podf = F.mse_loss(sim_podf, input_psfs[b, 1].unsqueeze(0))
+                recon_loss += mse_if + mse_podf
+
         recon_loss = recon_loss / batch_size
         return z_loss + self.recon_weight * recon_loss
 
