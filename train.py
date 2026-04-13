@@ -28,8 +28,7 @@ def train():
     sign_penalty = 10.0
     recon_weight = 0.4
     
-    train_dir = "../dataset/train_data" if use_fixed_dirs else "../dataset/def-onf-if/imgData-rr-z48"
-    val_dir = "../dataset/val_data" if use_fixed_dirs else None
+    train_dir = "../dataset/def-onf-if/imgData-rr-z48"
 
     weight_path = './weights/resnet34-333f7ec4.pth'   # resnet+cbam
     # weight_path = './weights/vit_b_16-c867db91.pth'   # vit
