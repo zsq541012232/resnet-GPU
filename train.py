@@ -70,8 +70,8 @@ def train():
     print(">>> Initializing ZernikeViT...")
     # model = ZernikeViT(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # vit
     # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # resnet+cbam
-    model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)
-    # model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+    # model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)
+    model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
   
     if use_physics_loss:
         criterion = PhysicsInformedLoss(sign_penalty=sign_penalty,
@@ -100,7 +100,7 @@ def train():
     #)
 
     # 训练记录扩展了正负号错误率统计
-    history = {'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': [], 'val_sign_err_sample': [],
+    history = {'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': [],
                'val_sign_err_item': []}
 
     print(">>> [Step 3] Starting GPU training loop...")
@@ -190,7 +190,7 @@ def plot_history(history):
     ax1.grid(True)
 
     ax2.plot(history['epoch'], history['lr'], label='Learning Rate', color='orange')
-    ax2.set_title('Learning Rate Schedule (Cosine Warm Restarts)')
+    ax2.set_title('Learning Rate Schedule (OneCycleLR)')
     ax2.set_xlabel('Epochs')
     ax2.set_ylabel('Learning Rate')
     ax2.legend()
