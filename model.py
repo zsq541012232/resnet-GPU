@@ -524,18 +524,10 @@ class DifferentiablePSFSimulator(nn.Module):
         phase = phase * self.pupil_mask.unsqueeze(0)
         return phase
 
-    def forward(self, coeffs, defocus_rad=0.0):
+    def forward(self, coeffs):
         B = coeffs.shape[0]
         phase = self.zernike_to_phase(coeffs)
-        if defocus_rad != 0.0:
-            y, x = torch.meshgrid(
-                torch.linspace(-1, 1, self.pupil_size, device=phase.device),
-                torch.linspace(-1, 1, self.pupil_size, device=phase.device),
-                indexing='ij'
-            )
-            r2 = x**2 + y**2
-            phase = phase + defocus_rad * (2 * r2 - 1)
-
+        
         pupil = self.pupil_mask.unsqueeze(0).unsqueeze(0) * torch.exp(1j * phase)
         psf = torch.abs(torch.fft.fftshift(torch.fft.fft2(pupil.squeeze(1)))) ** 2
         psf = psf / (psf.sum(dim=[1, 2], keepdim=True) + 1e-8)
@@ -545,14 +537,12 @@ class DifferentiablePSFSimulator(nn.Module):
 class PhysicsInformedLoss(nn.Module):
     """
     核心Loss：符号加权MSE + 可微物理重建Loss
-    强制网络输出的Zernike必须能同时完美重建「在焦 + 正离焦」两张PSF → 符号歧义被彻底消除
+    强制网络输出的Zernike必须能完美重建在焦PSF → 符号歧义被彻底消除
     """
-    def __init__(self, sign_penalty=10.0, recon_weight=0.4, defocus_rad=1.0, only_infocus_recon=True):
+    def __init__(self, sign_penalty=10.0, recon_weight=0.4):
         super().__init__()
         self.sign_loss = SignWeightedMSELoss(penalty_weight=sign_penalty)
         self.recon_weight = recon_weight
-        self.defocus_rad = defocus_rad
-        self.only_infocus_recon = only_infocus_recon  
         self.psf_sim = DifferentiablePSFSimulator()
 
     def set_psf_simulator(self, zernike_basis, pupil_mask):
@@ -569,15 +559,8 @@ class PhysicsInformedLoss(nn.Module):
             # 始终计算在焦重建
             sim_if = self.psf_sim(pred[b:b+1], defocus_rad=0.0)
             mse_if = F.mse_loss(sim_if, input_psfs[b, 0].unsqueeze(0))
-
-            if self.only_infocus_recon:
-                recon_loss += mse_if
-            else:
-                # 原来双图像重建逻辑
-                sim_podf = self.psf_sim(pred[b:b+1], defocus_rad=self.defocus_rad)
-                mse_podf = F.mse_loss(sim_podf, input_psfs[b, 1].unsqueeze(0))
-                recon_loss += mse_if + mse_podf
-
+            recon_loss += mse_if
+            
         recon_loss = recon_loss / batch_size
         return z_loss + self.recon_weight * recon_loss
 
