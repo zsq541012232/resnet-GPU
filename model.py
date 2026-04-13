@@ -113,7 +113,7 @@ def compute_zernike_basis(pupil_size=224, num_modes=35):
 # ====================== 【核心修改】真正的Twin/Siamese结构 ======================
 class SiameseEncoder(nn.Module):
     """共享权重的单分支编码器（原ViT+AttnRes+RoPE的核心部分）"""
-    def __init__(self, in_channels=1, patch_size=16, embed_dim=768, depth=12, num_heads=12, block_size=4):
+    def __init__(self, in_channels=1, patch_size=16, embed_dim=384, depth=10, num_heads=6, block_size=4):
         super().__init__()
         self.patch_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -154,7 +154,7 @@ class ZernikeSiameseViTAttnResRoPE(nn.Module):
     - 两个完全共享权重的分支分别处理imgIF和imgPoDF
     - 特征融合后输出Zernike系数
     """
-    def __init__(self, num_outputs, patch_size=16, embed_dim=768, depth=12, num_heads=12, block_size=4):
+    def __init__(self, num_outputs, patch_size=16, embed_dim=384, depth=10, num_heads=6, block_size=4):
         super().__init__()
         self.encoder = SiameseEncoder(in_channels=1, patch_size=patch_size,
                                       embed_dim=embed_dim, depth=depth,
@@ -436,7 +436,7 @@ class AttnResTransformerBlockRoPE(nn.Module):
 # ====================== 新模型：ZernikeViTAttnResRoPE ======================
 class ZernikeViTAttnResRoPE(nn.Module):
     def __init__(self, num_outputs, in_channels=3, weight_path=None,
-                 patch_size=16, embed_dim=768, depth=12, num_heads=12, block_size=4):
+                 patch_size=16, embed_dim=384, depth=10, num_heads=6, block_size=4):
         super().__init__()
 
         self.patch_size = patch_size
