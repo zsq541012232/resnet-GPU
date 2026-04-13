@@ -50,11 +50,14 @@ def test_and_plot():
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     # --- 2. 加载模型 ---
-    # model = ZernikeViT(num_outputs=num_modes, in_channels=model_in_channels).to(device)   # vit
-    # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels).to(device)   # resnet+cbam
-    # model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels).to(device)
-    model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)   # ← 不要传 in_channels
-
+    if use_fixed_3channel:
+        # model = ZernikeViT(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # vit
+        # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)   # resnet+cbam
+        # model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels).to(device)
+        raise NotImplementedError("3通道模式暂未适配 Siamese 模型")
+    else:
+        model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+  
 
     model_weight_path = "./weights/model_best.pth"
     if os.path.exists(model_weight_path):
