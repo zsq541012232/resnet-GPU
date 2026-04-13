@@ -541,7 +541,7 @@ class PhysicsInformedLoss(nn.Module):
     核心Loss：符号加权MSE + 可微物理重建Loss
     强制网络输出的Zernike必须能完美重建在焦PSF → 符号歧义被彻底消除
     """
-    def __init__(self, sign_penalty=10.0, recon_weight=0.4):
+    def __init__(self, sign_penalty=10.0, recon_weight=0.2):
         super().__init__()
         self.sign_loss = SignWeightedMSELoss(penalty_weight=sign_penalty)
         self.recon_weight = recon_weight
@@ -558,9 +558,12 @@ class PhysicsInformedLoss(nn.Module):
         batch_size = pred.shape[0]
         recon_loss = 0.0
         for b in range(batch_size):
-            # 始终计算在焦重建
-            sim_if = self.psf_sim(pred[b:b+1])
-            mse_if = F.mse_loss(sim_if, input_psfs[b, 0].unsqueeze(0))
+            sim_if = self.psf_sim(pred[b:b+1])                    # (1, H, W) 线性
+            # 把 input 反 log 回线性空间（近似）
+            target_if = torch.expm1(input_psfs[b, 0].unsqueeze(0).clamp(min=0))
+            # 归一化到 sum=1（和 sim_if 保持一致）
+            target_if = target_if / (target_if.sum() + 1e-8)
+            mse_if = F.mse_loss(sim_if, target_if)
             recon_loss += mse_if
             
         recon_loss = recon_loss / batch_size
