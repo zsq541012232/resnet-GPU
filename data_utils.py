@@ -22,7 +22,6 @@ def split_dataset(data_dir, test_size=0.1, val_size=0.1):
     return train_idx, val_idx, test_idx
 
 
-# 新增：直接从固定文件夹获取所有样本索引 (需求4)
 def get_indices_from_dir(data_dir):
     csv_files = glob.glob(os.path.join(data_dir, "Zernike*.csv"))
     indices = [int(os.path.basename(f).replace("Zernike", "").replace(".csv", "")) for f in csv_files]
@@ -31,7 +30,6 @@ def get_indices_from_dir(data_dir):
 
 def load_zernike_coeffs(filepath, num_modes=35):
     df = pd.read_csv(filepath, header=None)
-    # 展平后截取指定项数
     coeffs = df.values.flatten()[:num_modes]
     return coeffs
 
@@ -54,17 +52,26 @@ def compute_zernike_stats(data_dir, train_idx, num_modes=35):
     return mean, std
 
 
-# 修改：去除了 z_mean 和 z_std (需求1)
 class ZernikeDataset(Dataset):
-    def __init__(self, data_dir, indices, prefixes=["imgIF"], num_modes=35):
+    def __init__(self, data_dir, indices, prefixes=["imgIF"], num_modes=35, use_log_preprocess=True):
         self.data_dir = data_dir
         self.indices = indices
         self.prefixes = prefixes
         self.num_modes = num_modes
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Resize((224, 224), antialias=True),
-        ])
+        self.use_log_preprocess = use_log_preprocess
+
+        transform_list = [
+            transforms.ToTensor(),                     # PIL/np → [0,1] float tensor
+        ]
+        if self.use_log_preprocess:
+            transform_list.append(
+                transforms.Lambda(lambda x: torch.log1p(x))  # log(1 + x)，防止 log(0) 并增强动态范围
+            )
+        transform_list.append(
+            transforms.Resize((224, 224), antialias=True)
+        )
+
+        self.transform = transforms.Compose(transform_list)
 
     def __len__(self):
         return len(self.indices)
@@ -73,7 +80,6 @@ class ZernikeDataset(Dataset):
         file_idx = self.indices[idx]
         imgs = []
         for prefix in self.prefixes:
-            # 兼容大小写差异
             img_path = os.path.join(self.data_dir, f"{prefix}{file_idx}.jpg")
             if not os.path.exists(img_path) and prefix.lower() == "imgnedf":
                 img_path = os.path.join(self.data_dir, f"imgNedf{file_idx}.jpg")
@@ -81,26 +87,34 @@ class ZernikeDataset(Dataset):
             img = Image.open(img_path).convert('L')
             imgs.append(np.array(img))
 
-        stacked = np.stack(imgs, axis=-1)
-        img_tensor = self.transform(stacked)
+        stacked = np.stack(imgs, axis=-1)          # (H, W, C)
+        img_tensor = self.transform(stacked)       # 应用 log + Resize
 
         coeff_path = os.path.join(self.data_dir, f"Zernike{file_idx}.csv")
         coeffs = load_zernike_coeffs(coeff_path, self.num_modes)
-        # 去除正则化步骤
         return img_tensor, torch.FloatTensor(coeffs)
 
 
-# 新增：固定 3 通道补零输入逻辑 (需求5)
 class ZernikeDatasetFixed3Channel(Dataset):
-    def __init__(self, data_dir, indices, input_types=["imgIF"], num_modes=35):
+    def __init__(self, data_dir, indices, input_types=["imgIF"], num_modes=35, use_log_preprocess=True):
         self.data_dir = data_dir
         self.indices = indices
-        self.input_types = input_types  # 当前实际传入的图像类型，例如 ["imgIF", "imgPoDF"]
+        self.input_types = input_types
         self.num_modes = num_modes
-        self.transform = transforms.Compose([
+        self.use_log_preprocess = use_log_preprocess
+
+        transform_list = [
             transforms.ToTensor(),
-            transforms.Resize((224, 224), antialias=True),
-        ])
+        ]
+        if self.use_log_preprocess:
+            transform_list.append(
+                transforms.Lambda(lambda x: torch.log1p(x))   # log(1 + x) 预处理
+            )
+        transform_list.append(
+            transforms.Resize((224, 224), antialias=True)
+        )
+
+        self.transform = transforms.Compose(transform_list)
 
     def __len__(self):
         return len(self.indices)
@@ -109,7 +123,7 @@ class ZernikeDatasetFixed3Channel(Dataset):
         file_idx = self.indices[idx]
         imgs = []
 
-        # 通道 1: imgIF (默认存在，放在首位)
+        # 通道 1: imgIF
         img_if_path = os.path.join(self.data_dir, f"imgIF{file_idx}.jpg")
         img_if = np.array(Image.open(img_if_path).convert('L'))
         imgs.append(img_if)
@@ -132,9 +146,8 @@ class ZernikeDatasetFixed3Channel(Dataset):
             img_nedf = np.zeros_like(img_if)
         imgs.append(img_nedf)
 
-        # 始终 stack 成 3 个通道
         stacked = np.stack(imgs, axis=-1)
-        img_tensor = self.transform(stacked)
+        img_tensor = self.transform(stacked)          # 应用 log + Resize
 
         coeff_path = os.path.join(self.data_dir, f"Zernike{file_idx}.csv")
         coeffs = load_zernike_coeffs(coeff_path, self.num_modes)
@@ -151,7 +164,7 @@ def visualize_sample(dataset, idx=0):
 
     for i in range(num_channels):
         axes[i].imshow(img[i].numpy(), cmap='gray')
-        if i < len(dataset.prefixes):
-            axes[i].set_title(dataset.prefixes[i])
+        if i < len(dataset.prefixes) if hasattr(dataset, 'prefixes') else True:
+            axes[i].set_title(f"Channel {i} (log preprocessed)" if dataset.use_log_preprocess else f"Channel {i}")
     plt.tight_layout()
     plt.show()
