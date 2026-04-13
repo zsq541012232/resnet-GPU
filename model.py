@@ -515,9 +515,12 @@ class DifferentiablePSFSimulator(nn.Module):
         self.pupil_mask = None      # (H, W)
 
     def set_basis(self, zernike_basis, pupil_mask):
-        self.zernike_basis = zernike_basis.to(self.device if hasattr(self, 'device') else 'cpu')
-        self.pupil_mask = pupil_mask.to(self.device if hasattr(self, 'device') else 'cpu')
-        self.to(self.zernike_basis.device)
+        """设置Zernike基底并自动迁移到正确设备"""
+        device = zernike_basis.device
+        self.zernike_basis = zernike_basis.to(device)
+        self.pupil_mask = pupil_mask.to(device)
+        self.to(device)          # 确保整个模块都在正确设备上
+        print(f"    ✅ PSF Simulator 已迁移到设备: {device}")
 
     def zernike_to_phase(self, coeffs):
         if self.zernike_basis is None:
