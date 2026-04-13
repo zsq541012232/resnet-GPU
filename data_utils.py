@@ -34,23 +34,6 @@ def load_zernike_coeffs(filepath, num_modes=35):
     return coeffs
 
 
-def compute_zernike_stats(data_dir, train_idx, num_modes=35):
-    print(">>> [Step 2] Computing Zernike statistics from training set (this may take a moment)...")
-    all_coeffs = []
-    for i, idx in enumerate(train_idx):
-        filepath = os.path.join(data_dir, f"Zernike{idx}.csv")
-        coeffs = load_zernike_coeffs(filepath, num_modes)
-        all_coeffs.append(coeffs)
-
-        if (i + 1) % 1000 == 0:
-            print(f"    Processed {i + 1}/{len(train_idx)} files...")
-
-    all_coeffs = np.array(all_coeffs)
-    mean = torch.FloatTensor(np.mean(all_coeffs, axis=0))
-    std = torch.FloatTensor(np.std(all_coeffs, axis=0))
-    print("    Statistics computation complete.")
-    return mean, std
-
 
 class ZernikeDataset(Dataset):
     def __init__(self, data_dir, indices, prefixes=["imgIF"], num_modes=35, use_log_preprocess=True):
