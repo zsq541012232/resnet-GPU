@@ -5,6 +5,31 @@ import os
 import torch.nn.functional as F
 
 
+class SignMarginLoss(nn.Module):
+    """
+    改进版符号一致性 Loss（推荐替换旧 SignWeightedMSELoss）。
+    核心：当 pred * target < margin 时给予强惩罚，防止模型缩到 0。
+    同时保留 MSE 主损失，并可与 cycle consistency 完美结合。
+    """
+    def __init__(self, mse_weight=1.0, margin=0.05, sign_penalty=8.0):
+        super().__init__()
+        self.mse = nn.MSELoss(reduction='none')
+        self.mse_weight = mse_weight
+        self.margin = margin                  # 关键超参：鼓励置信度（建议 0.01~0.1）
+        self.sign_penalty = sign_penalty      # 符号惩罚强度
+
+    def forward(self, pred, target):
+        base_mse = self.mse(pred, target)
+
+        # 符号乘积（>0 表示符号一致）
+        prod = pred * target
+        # margin hinge 惩罚：只有 prod < margin 时才惩罚（持续梯度）
+        sign_loss = torch.relu(self.margin - prod) * self.sign_penalty
+
+        loss = self.mse_weight * base_mse + sign_loss
+        return torch.mean(loss)
+
+
 class SignWeightedMSELoss(nn.Module):
     """
     兼顾符号一致性与均方误差的新型 Loss。
