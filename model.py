@@ -30,6 +30,36 @@ class SignMarginLoss(nn.Module):
         return torch.mean(loss)
 
 
+class SignMarginShrinkLoss(nn.Module):
+    """
+    符号一致性 + 错误时强制缩小幅度（推荐替换 SignMarginLoss）
+    核心思想：
+    - 主损失：MSE + 符号 hinge（保证尽量符号一致）
+    - 额外 shrink_loss：仅当 prod < 0（符号错误）时，对 |pred| 进行惩罚
+      → 模型“知道”如果要错，就宁愿输出接近0的弱预测，而不是大数值错号
+    """
+    def __init__(self, mse_weight=1.0, margin=0.05, sign_penalty=8.0, shrink_weight=3.0):
+        super().__init__()
+        self.mse = nn.MSELoss(reduction='none')
+        self.mse_weight = mse_weight
+        self.margin = margin                  # 符号一致性阈值（建议保持 0.01~0.1）
+        self.sign_penalty = sign_penalty      # 符号错误时的强惩罚
+        self.shrink_weight = shrink_weight    # 新增：符号错误时对 |pred| 的额外惩罚强度（建议 2.0~5.0）
+
+    def forward(self, pred, target):
+        base_mse = self.mse(pred, target)
+        prod = pred * target
+
+        # 1. 原有的符号一致性 hinge 惩罚（prod < margin 时强惩罚）
+        sign_loss = torch.relu(self.margin - prod) * self.sign_penalty
+
+        # 2. 新增：仅符号错误时，额外惩罚 |pred|（鼓励推向 0）
+        # 使用 relu(-prod) 实现 smooth 激活，避免硬 mask
+        shrink_loss = self.shrink_weight * torch.relu(-prod) * torch.abs(pred)
+
+        loss = self.mse_weight * base_mse + sign_loss + shrink_loss
+        return torch.mean(loss)
+
 class SignWeightedMSELoss(nn.Module):
     """
     兼顾符号一致性与均方误差的新型 Loss。

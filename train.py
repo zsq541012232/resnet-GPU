@@ -1,8 +1,9 @@
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 from data_utils import split_dataset, get_indices_from_dir, ZernikeDataset, ZernikeDatasetFixed3Channel
-from model import (ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss, SignMarginLoss,
+from model import (SignMarginShrinkLoss, ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss, SignMarginLoss,
                    ZernikeSiameseViTAttnResRoPE)
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -41,6 +42,7 @@ def train():
 
     margin = 0.05
     sign_penalty = 8.0
+    shrink_weight = 3.0    # ← 推荐从 2.0 开始尝试，最高可到 5.0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f">>> Using Device: {device} | Modes: {num_modes}")
@@ -65,12 +67,14 @@ def train():
     # ==========================================
     # --- 3. 模型与损失函数初始化 ---
     # ==========================================
-    print(">>> Initializing ZernikeSiameseViTAttnResRoPE...")
+    print(">>> Initializing Model...")
 
     if use_fixed_3channel:
         raise NotImplementedError("3通道模式暂未适配 Siamese 模型")
     else:
-        model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+        # model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+        # model = ZernikeEffNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=None).to(device)
+        model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)
 
     # 加载预训练生成式模型（冻结）
     gen_model = None
@@ -88,11 +92,14 @@ def train():
         gen_model.eval()
         print("    ✅ 生成式模型已冻结，用于 cycle consistency")
 
-    
-    #criterion = SignWeightedMSELoss(penalty_weight=sign_penalty).to(device)
-    #print("    ✅ 已使用 SignWeightedMSELoss（含符号惩罚）")
-    criterion = SignMarginLoss(mse_weight=1.0, margin=margin, sign_penalty=sign_penalty).to(device)
-    print(f"    ✅ 已使用 SignMarginLoss（margin={margin}, penalty={sign_penalty}）")
+    criterion = nn.MSELoss().to(device)
+    print("    ✅ 已使用 nn.MSELoss")
+    # criterion = SignWeightedMSELoss(penalty_weight=sign_penalty).to(device)
+    # print("    ✅ 已使用 SignWeightedMSELoss（含符号惩罚）")
+    # criterion = SignMarginLoss(mse_weight=1.0, margin=margin, sign_penalty=sign_penalty).to(device)
+    # print(f"    ✅ 已使用 SignMarginLoss（margin={margin}, penalty={sign_penalty}）")
+    # criterion = SignMarginShrinkLoss(mse_weight=1.0,margin=margin, sign_penalty=sign_penalty, shrink_weight=shrink_weight).to(device)
+    # print(f"    ✅ 已使用 SignMarginShrinkLoss（margin={margin}, sign_penalty={sign_penalty}, shrink_weight={shrink_weight}）")
 
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)

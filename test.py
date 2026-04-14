@@ -56,7 +56,9 @@ def test_and_plot():
         # model = ZernikeViTAttnResRoPE(num_outputs=num_modes, in_channels=model_in_channels).to(device)
         raise NotImplementedError("3通道模式暂未适配 Siamese 模型")
     else:
-        model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+        # model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+        # model = ZernikeEffNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=None).to(device)
+        model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels).to(device)
   
 
     model_weight_path = "./weights/model_best.pth"
@@ -131,7 +133,7 @@ def test_and_plot():
         sample_id = test_idx[i]
         s_mse = mean_squared_error(true_np[i], pred_np[i])
         s_r2 = r2_score(true_np[i], pred_np[i])
-        s_sign_errors = np.sum(sign_mismatch[i])
+        s_sign_errors = np.sum(mismatch[i])
         s_latency = all_latencies[i]
 
         sample_mse_list.append(s_mse)
