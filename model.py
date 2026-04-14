@@ -3,8 +3,6 @@ import torch.nn as nn
 from torchvision import models
 import os
 import torch.nn.functional as F
-import numpy as np                    
-from math import factorial  
 
 
 class SignWeightedMSELoss(nn.Module):
@@ -12,24 +10,15 @@ class SignWeightedMSELoss(nn.Module):
     兼顾符号一致性与均方误差的新型 Loss。
     当预测值与真实值符号相反时，给予额外的惩罚权重。
     """
-
     def __init__(self, penalty_weight=2.0):
         super(SignWeightedMSELoss, self).__init__()
         self.penalty_weight = penalty_weight
         self.mse = nn.MSELoss(reduction='none')
 
     def forward(self, pred, target):
-        # 计算基础 MSE (保留每一个元素的独立 loss)
         base_loss = self.mse(pred, target)
-
-        # 判断符号是否一致：正数*正数>0，负数*负数>0，符号相反相乘<0
-        # 注意：如果某一项真实值为 0，则不计算符号惩罚
         sign_match = torch.sign(pred) * torch.sign(target)
-
-        # 对于符号相反的地方，施加 penalty_weight 倍的惩罚
         weight = torch.where(sign_match < 0, self.penalty_weight, 1.0)
-
-        # 返回加权后的平均 Loss
         return torch.mean(base_loss * weight)
 
 
@@ -57,62 +46,8 @@ class CBAM(nn.Module):
         return out
 
 
-# ====================== 【新增】Zernike基底预计算函数 ======================
-def compute_zernike_basis(pupil_size=224, num_modes=35):
-    """
-    计算标准ANSI/OSA排序的Zernike基底（归一化到圆形光瞳）。
-    返回可直接用于PhysicsInformedLoss的torch张量。
-    """
-    print(f">>> [compute_zernike_basis] 生成 {num_modes} 个Zernike模式，尺寸 {pupil_size}×{pupil_size}...")
-    
-    coords = np.linspace(-1, 1, pupil_size)
-    X, Y = np.meshgrid(coords, coords)
-    R = np.sqrt(X**2 + Y**2)
-    Theta = np.arctan2(Y, X)
-    mask = (R <= 1.0).astype(np.float32)
-
-    def radial_poly(n, m, rho):
-        if m > n or (n - m) % 2 != 0:
-            return np.zeros_like(rho)
-        R = np.zeros_like(rho)
-        for k in range(0, (n - m) // 2 + 1):
-            coeff = (-1)**k * factorial(n - k) / (
-                factorial(k) * factorial((n + m) // 2 - k) * factorial((n - m) // 2 - k)
-            )
-            R += coeff * (rho ** (n - 2 * k))
-        return R
-
-    basis = []
-    n = 0
-    while len(basis) < num_modes:
-        for m in range(-n, n + 1, 2):
-            if len(basis) >= num_modes:
-                break
-            if m == 0:
-                Z = np.sqrt(n + 1) * radial_poly(n, 0, R) * mask
-            else:
-                m_abs = abs(m)
-                trig = np.cos(m_abs * Theta) if m > 0 else np.sin(m_abs * Theta)
-                Z = np.sqrt(2 * (n + 1)) * radial_poly(n, m_abs, R) * trig * mask
-            
-            # 归一化（使基底在光瞳内正交）
-            area = np.sum(mask)
-            if area > 0:
-                Z /= np.sqrt(np.sum(Z**2) / area)
-            basis.append(Z)
-        n += 1
-
-    basis_np = np.stack(basis[:num_modes], axis=0)          # (num_modes, H, W)
-    zernike_basis = torch.from_numpy(basis_np).float()
-    pupil_mask = torch.from_numpy(mask).float()
-
-    print(f"    ✓ 成功生成 {num_modes} 个Zernike模式（含活塞/倾斜/离焦等）")
-    return zernike_basis, pupil_mask
-
-
-# ====================== 【核心修改】真正的Twin/Siamese结构 ======================
+# ====================== 真正的Twin/Siamese结构 ======================
 class SiameseEncoder(nn.Module):
-    """共享权重的单分支编码器（原ViT+AttnRes+RoPE的核心部分）"""
     def __init__(self, in_channels=1, patch_size=16, embed_dim=384, depth=10, num_heads=6, block_size=4):
         super().__init__()
         self.patch_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False)
@@ -135,7 +70,7 @@ class SiameseEncoder(nn.Module):
             nn.init.zeros_(m.bias)
             nn.init.ones_(m.weight)
 
-    def forward(self, x):   # x: (B, 1, H, W)
+    def forward(self, x):
         B = x.shape[0]
         x = self.patch_embed(x).flatten(2).transpose(1, 2)
         cls_tokens = self.cls_token.expand(B, -1, -1)
@@ -145,21 +80,15 @@ class SiameseEncoder(nn.Module):
         for blk in self.layers:
             blocks, hidden = blk(blocks, hidden)
         hidden = self.norm(hidden)
-        return hidden[:, 0]   # (B, embed_dim) 全局特征
+        return hidden[:, 0]
 
 
 class ZernikeSiameseViTAttnResRoPE(nn.Module):
-    """
-    真正的Twin/Siamese结构（强烈推荐用于[在焦 + 正离焦]输入）
-    - 两个完全共享权重的分支分别处理imgIF和imgPoDF
-    - 特征融合后输出Zernike系数
-    """
     def __init__(self, num_outputs, patch_size=16, embed_dim=384, depth=10, num_heads=6, block_size=4):
         super().__init__()
         self.encoder = SiameseEncoder(in_channels=1, patch_size=patch_size,
                                       embed_dim=embed_dim, depth=depth,
                                       num_heads=num_heads, block_size=block_size)
-        # 特征融合层
         self.fusion = nn.Sequential(
             nn.Linear(embed_dim * 2, embed_dim),
             nn.GELU(),
@@ -168,11 +97,11 @@ class ZernikeSiameseViTAttnResRoPE(nn.Module):
         self.head = nn.Linear(embed_dim, num_outputs)
         print("    ✅ ZernikeSiameseViTAttnResRoPE 初始化完成（Twin结构，已共享权重）")
 
-    def forward(self, x):   # x: (B, 2, H, W)
+    def forward(self, x):
         if x.shape[1] != 2:
             raise ValueError("Siamese模型要求输入正好2个通道 (imgIF + imgPoDF)")
-        img_if = x[:, 0:1, :, :]     # (B,1,H,W)
-        img_podf = x[:, 1:2, :, :]   # (B,1,H,W)
+        img_if = x[:, 0:1, :, :]
+        img_podf = x[:, 1:2, :, :]
         feat_if = self.encoder(img_if)
         feat_podf = self.encoder(img_podf)
         fused = torch.cat([feat_if, feat_podf], dim=1)
@@ -180,13 +109,11 @@ class ZernikeSiameseViTAttnResRoPE(nn.Module):
         return self.head(fused)
 
 
-
+# ====================== 其他模型（保持原样） ======================
 class ZernikeNet(nn.Module):
     def __init__(self, num_outputs, in_channels=3, weight_path=None):
         super(ZernikeNet, self).__init__()
-        # 适配 PyTorch 2.x 的参数写法
         resnet = models.resnet34(weights=None)
-
         if weight_path and os.path.exists(weight_path):
             try:
                 checkpoint = torch.load(weight_path, weights_only=False)
@@ -197,10 +124,8 @@ class ZernikeNet(nn.Module):
         else:
             print(f"    Weight file not found at {weight_path}. Initializing with random weights.")
 
-        # 如果输入通道数不是 3，则调整第一层卷积
         if in_channels != 3:
             resnet.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            # 重新初始化新卷积层的权重
             nn.init.kaiming_normal_(resnet.conv1.weight, mode='fan_out', nonlinearity='relu')
             print(f"    Adjusted conv1 for {in_channels} input channels.")
 
@@ -217,18 +142,14 @@ class ZernikeNet(nn.Module):
     def forward(self, x):
         x = self.features(x)
         x = self.avgpool(x)
-        x = torch.flatten(x, 1) # 现代 PyTorch 推荐写法
+        x = torch.flatten(x, 1)
         return self.fc(x)
 
 
 class ZernikeViT(nn.Module):
     def __init__(self, num_outputs, in_channels=3, weight_path=None):
         super(ZernikeViT, self).__init__()
-
-        # 1. 实例化标准 ViT 模型 (ViT-Base, Patch Size 16)
         self.vit = models.vit_b_16(weights=None)
-
-        # 2. 加载预训练权重（如果提供）
         if weight_path and os.path.exists(weight_path):
             try:
                 checkpoint = torch.load(weight_path, weights_only=False)
@@ -239,39 +160,29 @@ class ZernikeViT(nn.Module):
         else:
             print(f"    Weight file not found at {weight_path}. Initializing with random weights.")
 
-        # 3. 动态输入适配：修改 Patch Embedding 层以兼容多通道输入
         if in_channels != 3:
             original_conv = self.vit.conv_proj
             self.vit.conv_proj = nn.Conv2d(
-                in_channels,
-                original_conv.out_channels,
+                in_channels, original_conv.out_channels,
                 kernel_size=original_conv.kernel_size,
                 stride=original_conv.stride,
                 padding=original_conv.padding,
                 bias=original_conv.bias is not None
             )
-            # 重新初始化新卷积层的权重
             nn.init.kaiming_normal_(self.vit.conv_proj.weight, mode='fan_out', nonlinearity='relu')
-            print(f"    Adjusted ViT patch embedding (conv_proj) for {in_channels} input channels.")
+            print(f"    Adjusted ViT patch embedding for {in_channels} input channels.")
 
-        # 4. 回归头适配：将分类头替换为线性回归头
         in_features = self.vit.heads.head.in_features
         self.vit.heads.head = nn.Linear(in_features, num_outputs)
 
     def forward(self, x):
-        # ViT 的前向传播直接输出预测结果
         return self.vit(x)
 
 
 class ZernikeEffNet(nn.Module):
     def __init__(self, num_outputs, in_channels=3, weight_path=None):
         super(ZernikeEffNet, self).__init__()
-
-        # 1. 实例化 EfficientNet-B3 (或者 b0, b7 等)
-        # weights=None 表示不加载 torchvision 默认的 ImageNet 权重
         self.model = models.efficientnet_b3(weights=None)
-
-        # 2. 加载本地预训练权重
         if weight_path and os.path.exists(weight_path):
             try:
                 checkpoint = torch.load(weight_path, weights_only=False)
@@ -282,23 +193,18 @@ class ZernikeEffNet(nn.Module):
         else:
             print(f"    Weight file not found at {weight_path}. Initializing with random weights.")
 
-        # 3. 动态输入适配：修改第一层卷积 (features[0][0])
         if in_channels != 3:
             original_conv = self.model.features[0][0]
             self.model.features[0][0] = nn.Conv2d(
-                in_channels,
-                original_conv.out_channels,
+                in_channels, original_conv.out_channels,
                 kernel_size=original_conv.kernel_size,
                 stride=original_conv.stride,
                 padding=original_conv.padding,
                 bias=original_conv.bias is not None
             )
-            # 重新初始化
             nn.init.kaiming_normal_(self.model.features[0][0].weight, mode='fan_out', nonlinearity='relu')
             print(f"    Adjusted EfficientNet input conv for {in_channels} channels.")
 
-        # 4. 回归头适配：修改 classifier 最后一层
-        # EfficientNet 的 classifier 结构是 [Dropout, Linear]
         in_features = self.model.classifier[1].in_features
         self.model.classifier[1] = nn.Linear(in_features, num_outputs)
         print(f"    Adjusted EfficientNet head for {num_outputs} outputs.")
@@ -307,17 +213,14 @@ class ZernikeEffNet(nn.Module):
         return self.model(x)
 
 
-
-# ====================== RoPE 辅助函数 ======================
+# ====================== RoPE + Kimi AttnRes 相关组件（保持不变） ======================
 def rotate_half(x):
-    """RoPE 旋转操作"""
     x1 = x[..., :x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
 class RotaryEmbedding(nn.Module):
-    """1D RoPE"""
     def __init__(self, dim, base=10000):
         super().__init__()
         self.dim = dim
@@ -333,7 +236,6 @@ class RotaryEmbedding(nn.Module):
 
 
 class RoPEAttention(nn.Module):
-    """带 RoPE 的 Multi-Head Self-Attention（替换原来的 nn.MultiheadAttention）"""
     def __init__(self, dim, num_heads=12, qkv_bias=False):
         super().__init__()
         self.num_heads = num_heads
@@ -349,7 +251,6 @@ class RoPEAttention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
 
-        # === 应用 RoPE ===
         cos, sin = self.rope(N, x.device)
         cos = cos.unsqueeze(0).unsqueeze(0)
         sin = sin.unsqueeze(0).unsqueeze(0)
@@ -357,7 +258,6 @@ class RoPEAttention(nn.Module):
         q = q * cos + rotate_half(q) * sin
         k = k * cos + rotate_half(k) * sin
 
-        # Attention 计算
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
 
@@ -366,9 +266,7 @@ class RoPEAttention(nn.Module):
         return x
 
 
-# ====================== Kimi Block AttnRes（保持不变） ======================
 class BlockAttnRes(nn.Module):
-    """Kimi Block Attention Residuals"""
     def __init__(self, dim):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
@@ -383,9 +281,7 @@ class BlockAttnRes(nn.Module):
         return h
 
 
-# ====================== 带 RoPE 的 Kimi AttnRes Block ======================
 class AttnResTransformerBlockRoPE(nn.Module):
-    """Kimi AttnRes + RoPE Attention"""
     def __init__(self, dim, num_heads, mlp_ratio=4.0, block_size=4, layer_idx=0):
         super().__init__()
         self.layer_number = layer_idx
@@ -397,7 +293,6 @@ class AttnResTransformerBlockRoPE(nn.Module):
         self.attn_norm = nn.LayerNorm(dim)
         self.mlp_norm = nn.LayerNorm(dim)
 
-        # 使用 RoPE Attention
         self.attn = RoPEAttention(dim, num_heads=num_heads)
 
         mlp_hidden = int(dim * mlp_ratio)
@@ -410,46 +305,33 @@ class AttnResTransformerBlockRoPE(nn.Module):
     def forward(self, blocks: list, hidden_states: torch.Tensor):
         partial_block = hidden_states
 
-        # 1. AttnRes before self-attention
         h = self.attn_res(blocks, partial_block)
 
-        # 块边界判断（Kimi 原逻辑）
         if self.layer_number % (self.block_size // 2) == 0:
             blocks.append(partial_block.detach())
             partial_block = None
 
-        # 2. Self-Attention（带 RoPE）
         attn_out = self.attn(self.attn_norm(h))
-
         partial_block = partial_block + attn_out if partial_block is not None else attn_out
 
-        # 3. AttnRes before MLP
         h = self.mlp_res(blocks, partial_block)
-
-        # 4. MLP
         mlp_out = self.mlp(self.mlp_norm(h))
         partial_block = partial_block + mlp_out
 
         return blocks, partial_block
 
 
-# ====================== 新模型：ZernikeViTAttnResRoPE ======================
 class ZernikeViTAttnResRoPE(nn.Module):
     def __init__(self, num_outputs, in_channels=3, weight_path=None,
                  patch_size=16, embed_dim=384, depth=10, num_heads=6, block_size=4):
         super().__init__()
-
         self.patch_size = patch_size
         self.embed_dim = embed_dim
 
-        # Patch Embedding
         self.patch_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size,
                                      stride=patch_size, bias=False)
-
-        # Class Token
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
-        # Kimi AttnRes + RoPE Blocks
         self.layers = nn.ModuleList([
             AttnResTransformerBlockRoPE(embed_dim, num_heads, mlp_ratio=4.0,
                                         block_size=block_size, layer_idx=i)
@@ -459,7 +341,6 @@ class ZernikeViTAttnResRoPE(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.head = nn.Linear(embed_dim, num_outputs)
 
-        # 权重加载提示
         if weight_path and os.path.exists(weight_path):
             print(f"    ⚠️  ZernikeViTAttnResRoPE 使用 Kimi AttnRes + RoPE，无法加载标准 ViT 权重 → 从零初始化")
         else:
@@ -480,113 +361,15 @@ class ZernikeViTAttnResRoPE(nn.Module):
 
     def forward(self, x):
         B = x.shape[0]
-
-        # Patch Embedding
         x = self.patch_embed(x).flatten(2).transpose(1, 2)
-
-        # 添加 class token
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
-        # Kimi AttnRes 初始化
         blocks = [x]
         hidden = x
-
-        # 逐层前向（携带 blocks 列表 + RoPE）
         for blk in self.layers:
             blocks, hidden = blk(blocks, hidden)
 
-        # 最终输出
         hidden = self.norm(hidden)
         cls_feat = hidden[:, 0]
         return self.head(cls_feat)
-    
-
-# ====================== 【新增】可微PSF前向模拟器 + Physics-Informed Loss ======================
-class DifferentiablePSFSimulator(nn.Module):
-    """
-    可微PSF前向模型（用于物理重建Loss）。
-    """
-    def __init__(self, pupil_size=224, num_modes=35):
-        super().__init__()
-        self.pupil_size = pupil_size
-        self.num_modes = num_modes
-        self.zernike_basis = None   # (num_modes, H, W)
-        self.pupil_mask = None      # (H, W)
-
-    def set_basis(self, zernike_basis, pupil_mask):
-        """设置Zernike基底并自动迁移到正确设备"""
-        device = zernike_basis.device
-        self.zernike_basis = zernike_basis.to(device)
-        self.pupil_mask = pupil_mask.to(device)
-        self.to(device)          # 确保整个模块都在正确设备上
-        print(f"    ✅ PSF Simulator 已迁移到设备: {device}")
-
-    def zernike_to_phase(self, coeffs):
-        if self.zernike_basis is None:
-            raise RuntimeError("请先调用 set_basis() 传入Zernike基底")
-        phase = torch.einsum('bm, mhw -> bhw', coeffs, self.zernike_basis)
-        phase = phase * self.pupil_mask.unsqueeze(0)
-        return phase
-
-    def forward(self, coeffs):
-        """向量化的可微 PSF 前向模拟（支持任意 batch size）"""
-        if self.zernike_basis is None:
-            raise RuntimeError("请先调用 set_basis() 传入Zernike基底")
-        
-        phase = self.zernike_to_phase(coeffs)                    # (B, H, W)
-        
-        # === 关键修复：正确的 batch-friendly pupil 构建 ===
-        pupil = torch.exp(1j * phase) * self.pupil_mask.unsqueeze(0)   # (B, H, W) complex
-        
-        # FFT 计算 PSF
-        fft_result = torch.fft.fft2(pupil)
-        fft_shifted = torch.fft.fftshift(fft_result)
-        psf = torch.abs(fft_shifted) ** 2                        # (B, H, W)
-        
-        # 每张 PSF 独立归一化（sum=1）
-        psf = psf / (psf.sum(dim=[1, 2], keepdim=True) + 1e-8)
-        
-        return psf                                               # (B, H, W)
-
-class PhysicsInformedLoss(nn.Module):
-    """
-    核心Loss：符号加权MSE + 可微物理重建Loss
-    强制网络输出的Zernike必须能完美重建在焦PSF → 符号歧义被彻底消除
-    """
-    def __init__(self, sign_penalty=10.0, recon_weight=0.2):
-        super().__init__()
-        self.sign_loss = SignWeightedMSELoss(penalty_weight=sign_penalty)
-        self.recon_weight = recon_weight
-        self.psf_sim = DifferentiablePSFSimulator()
-
-    def set_psf_simulator(self, zernike_basis, pupil_mask):
-        self.psf_sim.set_basis(zernike_basis, pupil_mask)
-
-    def forward(self, pred, target, input_psfs=None):
-        """
-        向量化版本：
-        - sign_loss 保持不变
-        - recon_loss 一次性计算整个 batch（去掉 for-loop）
-        """
-        z_loss = self.sign_loss(pred, target)
-
-        if input_psfs is None or self.psf_sim.zernike_basis is None:
-            return z_loss
-
-        # ==================== 向量化的物理重建损失 ====================
-        # 1. 一次前向得到所有样本的模拟 in-focus PSF
-        sim_if = self.psf_sim(pred)                          # (B, H, W)
-
-        # 2. 把输入的 log1p(imgIF) 反变换回线性强度空间
-        target_if = torch.expm1(input_psfs[:, 0].clamp(min=0))   # (B, H, W)
-
-        # 3. 每张图像独立归一化（与 PSF 保持一致）
-        target_sum = target_if.sum(dim=[1, 2], keepdim=True) + 1e-8
-        target_if = target_if / target_sum
-
-        # 4. 计算 MSE（默认 reduction='mean'，等价于原来对每个样本求 mean 后再平均）
-        recon_loss = F.mse_loss(sim_if, target_if)
-
-        return z_loss + self.recon_weight * recon_loss
-    
