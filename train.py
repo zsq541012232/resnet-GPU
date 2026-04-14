@@ -39,6 +39,9 @@ def train():
     cycle_lambda = 0.05          # 可调，建议 0.01~0.1
     generative_weight_path = './weights/generative_best.pth'
 
+    margin = 0.05
+    sign_penalty = 8.0
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f">>> Using Device: {device} | Modes: {num_modes}")
 
@@ -85,10 +88,12 @@ def train():
         gen_model.eval()
         print("    ✅ 生成式模型已冻结，用于 cycle consistency")
 
-    # 仅使用 SignWeightedMSELoss（已移除物理重构 Loss）
-    sign_penalty = 10.0
-    criterion = SignWeightedMSELoss(penalty_weight=sign_penalty).to(device)
-    print("    ✅ 已使用 SignWeightedMSELoss（含符号惩罚）")
+    
+    #criterion = SignWeightedMSELoss(penalty_weight=sign_penalty).to(device)
+    #print("    ✅ 已使用 SignWeightedMSELoss（含符号惩罚）")
+    criterion = SignMarginLoss(mse_weight=1.0, margin=margin, sign_penalty=sign_penalty).to(device)
+    print(f"    ✅ 已使用 SignMarginLoss（margin={margin}, penalty={sign_penalty}）")
+
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
 
@@ -97,8 +102,12 @@ def train():
                                               epochs=epochs, pct_start=0.1)
 
     # 训练记录
-    history = {'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': [],
-               'val_sign_err_item': [], 'train_recon_loss': []}   
+    history = {
+        'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': [],
+        'val_sign_err_item': [], 'val_avg_wrong_mag': [], 'val_severe_sign_err': [],
+        'val_mean_sign_prod': [], 'val_norm_sign_err': [],
+        'train_recon_loss': []   
+    }
 
     print(">>> Starting GPU training loop...")
     for epoch in range(epochs):
@@ -154,21 +163,151 @@ def train():
         avg_val_loss = val_running_loss / len(val_loader)
 
         # 符号一致性评估
+        
+
+# ====================== model.py 修改（完整新 Loss 类）======================
+# 请将 model.py 中原有的 SignWeightedMSELoss 类 **完整替换** 为下面这个新类
+# （其他代码保持不变）
+
+class SignMarginLoss(nn.Module):
+    """
+    改进版符号一致性 Loss（推荐替换旧 SignWeightedMSELoss）。
+    核心：当 pred * target < margin 时给予强惩罚，防止模型缩到 0。
+    同时保留 MSE 主损失，并可与 cycle consistency 完美结合。
+    """
+    def __init__(self, mse_weight=1.0, margin=0.05, sign_penalty=8.0):
+        super().__init__()
+        self.mse = nn.MSELoss(reduction='none')
+        self.mse_weight = mse_weight
+        self.margin = margin                  # 关键超参：鼓励置信度（建议 0.01~0.1）
+        self.sign_penalty = sign_penalty      # 符号惩罚强度
+
+    def forward(self, pred, target):
+        base_mse = self.mse(pred, target)
+
+        # 符号乘积（>0 表示符号一致）
+        prod = pred * target
+        # margin hinge 惩罚：只有 prod < margin 时才惩罚（持续梯度）
+        sign_loss = torch.relu(self.margin - prod) * self.sign_penalty
+
+        loss = self.mse_weight * base_mse + sign_loss
+        return torch.mean(loss)
+# ====================== train.py 完整修改片段 ======================
+# 1. 文件顶部 import 保持不变（已包含 generative_model）
+
+# 2. 在 --- 1. 参数配置 --- 后增加/修改以下参数
+    # ==================== 新增/修改：Cycle + 新 Loss ====================
+    use_cycle_loss = True
+    cycle_lambda = 0.05
+    generative_weight_path = './weights/generative_best.pth'
+
+    # 新 Loss 超参（可根据验证曲线微调）
+    margin = 0.05
+    sign_penalty = 8.0
+
+# 3. 在 --- 3. 模型与损失函数初始化 --- 中 **替换 criterion**
+    print(">>> Initializing ZernikeSiameseViTAttnResRoPE...")
+
+    if use_fixed_3channel:
+        raise NotImplementedError("3通道模式暂未适配 Siamese 模型")
+    else:
+        model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+
+    # === 替换为新 Loss ===
+    criterion = SignMarginLoss(mse_weight=1.0, margin=margin, sign_penalty=sign_penalty).to(device)
+    print(f"    ✅ 已使用 SignMarginLoss（margin={margin}, penalty={sign_penalty}）")
+
+    # ...（gen_model 加载部分保持你之前已加的代码不变）
+
+# 4. history 字典初始化（新增 4 个指标）
+    history = {
+        'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': [],
+        'val_sign_err_item': [], 'val_avg_wrong_mag': [], 'val_severe_sign_err': [],
+        'val_mean_sign_prod': [], 'val_norm_sign_err': [],
+        'train_recon_loss': []   # 保留 cycle loss
+    }
+
+# 5. 训练循环中的 Train 部分（替换原 for imgs, targets in pbar: 块）
+        for imgs, targets in pbar:
+            imgs, targets = imgs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+            optimizer.zero_grad()
+            outputs = model(imgs)
+
+            loss_main = criterion(outputs, targets)          # 新 Loss 已包含 sign margin
+
+            if use_cycle_loss:
+                real_if = imgs[:, 0:1, :, :]                  # imgIF 通道
+                gen_if = gen_model(outputs)
+                recon_loss = nn.MSELoss()(gen_if, real_if)
+                loss = loss_main + cycle_lambda * recon_loss
+                current_recon = recon_loss.item()
+            else:
+                loss = loss_main
+                current_recon = 0.0
+
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+            train_running_loss += loss.item()
+            pbar.set_postfix(loss=loss.item(), recon=current_recon)
+
+# 6. Validation 部分（替换原 val 块中符号评估代码）
+        # --- Validation ---
+        model.eval()
+        val_running_loss = 0.0
+        val_all_preds, val_all_trues = [], []
+
+        with torch.no_grad():
+            vbar = tqdm(val_loader, desc=f"Epoch {epoch + 1}/{epochs} [Val]")
+            for imgs, targets in vbar:
+                imgs, targets = imgs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+                outputs = model(imgs)
+                loss = criterion(outputs, targets)
+                val_running_loss += loss.item()
+
+                val_all_preds.append(outputs.cpu().numpy())
+                val_all_trues.append(targets.cpu().numpy())
+
+        avg_val_loss = val_running_loss / len(val_loader)
+
+        # ==================== 新指标计算 ====================
         v_preds = np.concatenate(val_all_preds, axis=0)
         v_trues = np.concatenate(val_all_trues, axis=0)
-        sign_mismatch = (np.sign(v_preds) * np.sign(v_trues)) < 0
-        item_error_ratio = np.sum(sign_mismatch) / sign_mismatch.size
 
+        sign_match = np.sign(v_preds) * np.sign(v_trues)
+        mismatch = sign_match < 0
+        mismatch_ratio = np.mean(mismatch)
+
+        wrong_mag = np.abs(v_preds[mismatch])
+        avg_wrong_mag = np.mean(wrong_mag) if len(wrong_mag) > 0 else 0.0
+
+        threshold = 0.01
+        severe_mask = mismatch & (np.abs(v_preds) > threshold)
+        severe_ratio = np.mean(severe_mask)
+
+        mean_sign_prod = np.mean(v_preds * v_trues)
+
+        norm_sign_err = np.sum(np.abs(v_preds - v_trues)[mismatch]) / (np.sum(np.abs(v_trues)) + 1e-8)
+
+        # 记录到 history
         history['epoch'].append(epoch + 1)
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
         history['lr'].append(current_lr)
-        history['val_sign_err_item'].append(item_error_ratio)
-        history['train_recon_loss'].append(current_recon if use_cycle_loss else 0.0)
+        history['val_sign_err_item'].append(mismatch_ratio)
+        history['val_avg_wrong_mag'].append(avg_wrong_mag)
+        history['val_severe_sign_err'].append(severe_ratio)
+        history['val_mean_sign_prod'].append(mean_sign_prod)
+        history['val_norm_sign_err'].append(norm_sign_err)
+        history['train_recon_loss'].append(current_recon)
 
         epoch_end = time.time()
         print(f"    Epoch {epoch + 1}: Train Loss={avg_train_loss:.6f}, Val Loss={avg_val_loss:.6f}, "
-              f"SignErr(Item)={item_error_ratio:.1%}, Time={epoch_end - epoch_start:.1f}s")
+              f"SignErr={mismatch_ratio:.1%} | AvgWrongMag={avg_wrong_mag:.4f} | "
+              f"Severe={severe_ratio:.1%} | MeanProd={mean_sign_prod:.4f} | "
+              f"NormErr={norm_sign_err:.1%}, Time={epoch_end - epoch_start:.1f}s")
+
 
         pd.DataFrame(history).to_csv("./logs/training_log.csv", index=False)
 
@@ -179,36 +318,215 @@ def train():
     plot_history(history)
 
 
+python
+
+# ====================== model.py 修改（完整新 Loss 类）======================
+# 请将 model.py 中原有的 SignWeightedMSELoss 类 **完整替换** 为下面这个新类
+# （其他代码保持不变）
+
+class SignMarginLoss(nn.Module):
+    """
+    改进版符号一致性 Loss（推荐替换旧 SignWeightedMSELoss）。
+    核心：当 pred * target < margin 时给予强惩罚，防止模型缩到 0。
+    同时保留 MSE 主损失，并可与 cycle consistency 完美结合。
+    """
+    def __init__(self, mse_weight=1.0, margin=0.05, sign_penalty=8.0):
+        super().__init__()
+        self.mse = nn.MSELoss(reduction='none')
+        self.mse_weight = mse_weight
+        self.margin = margin                  # 关键超参：鼓励置信度（建议 0.01~0.1）
+        self.sign_penalty = sign_penalty      # 符号惩罚强度
+
+    def forward(self, pred, target):
+        base_mse = self.mse(pred, target)
+
+        # 符号乘积（>0 表示符号一致）
+        prod = pred * target
+        # margin hinge 惩罚：只有 prod < margin 时才惩罚（持续梯度）
+        sign_loss = torch.relu(self.margin - prod) * self.sign_penalty
+
+        loss = self.mse_weight * base_mse + sign_loss
+        return torch.mean(loss)
+# ====================== train.py 完整修改片段 ======================
+# 1. 文件顶部 import 保持不变（已包含 generative_model）
+
+# 2. 在 --- 1. 参数配置 --- 后增加/修改以下参数
+    # ==================== 新增/修改：Cycle + 新 Loss ====================
+    use_cycle_loss = True
+    cycle_lambda = 0.05
+    generative_weight_path = './weights/generative_best.pth'
+
+    # 新 Loss 超参（可根据验证曲线微调）
+    margin = 0.05
+    sign_penalty = 8.0
+
+# 3. 在 --- 3. 模型与损失函数初始化 --- 中 **替换 criterion**
+    print(">>> Initializing ZernikeSiameseViTAttnResRoPE...")
+
+    if use_fixed_3channel:
+        raise NotImplementedError("3通道模式暂未适配 Siamese 模型")
+    else:
+        model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
+
+    # === 替换为新 Loss ===
+    criterion = SignMarginLoss(mse_weight=1.0, margin=margin, sign_penalty=sign_penalty).to(device)
+    print(f"    ✅ 已使用 SignMarginLoss（margin={margin}, penalty={sign_penalty}）")
+
+    # ...（gen_model 加载部分保持你之前已加的代码不变）
+
+# 4. history 字典初始化（新增 4 个指标）
+    history = {
+        'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': [],
+        'val_sign_err_item': [], 'val_avg_wrong_mag': [], 'val_severe_sign_err': [],
+        'val_mean_sign_prod': [], 'val_norm_sign_err': [],
+        'train_recon_loss': []   # 保留 cycle loss
+    }
+
+# 5. 训练循环中的 Train 部分（替换原 for imgs, targets in pbar: 块）
+        for imgs, targets in pbar:
+            imgs, targets = imgs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+            optimizer.zero_grad()
+            outputs = model(imgs)
+
+            loss_main = criterion(outputs, targets)          # 新 Loss 已包含 sign margin
+
+            if use_cycle_loss:
+                real_if = imgs[:, 0:1, :, :]                  # imgIF 通道
+                gen_if = gen_model(outputs)
+                recon_loss = nn.MSELoss()(gen_if, real_if)
+                loss = loss_main + cycle_lambda * recon_loss
+                current_recon = recon_loss.item()
+            else:
+                loss = loss_main
+                current_recon = 0.0
+
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+            train_running_loss += loss.item()
+            pbar.set_postfix(loss=loss.item(), recon=current_recon)
+
+# 6. Validation 部分（替换原 val 块中符号评估代码）
+        # --- Validation ---
+        model.eval()
+        val_running_loss = 0.0
+        val_all_preds, val_all_trues = [], []
+
+        with torch.no_grad():
+            vbar = tqdm(val_loader, desc=f"Epoch {epoch + 1}/{epochs} [Val]")
+            for imgs, targets in vbar:
+                imgs, targets = imgs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+                outputs = model(imgs)
+                loss = criterion(outputs, targets)
+                val_running_loss += loss.item()
+
+                val_all_preds.append(outputs.cpu().numpy())
+                val_all_trues.append(targets.cpu().numpy())
+
+        avg_val_loss = val_running_loss / len(val_loader)
+
+        # ==================== 新指标计算 ====================
+        v_preds = np.concatenate(val_all_preds, axis=0)
+        v_trues = np.concatenate(val_all_trues, axis=0)
+
+        sign_match = np.sign(v_preds) * np.sign(v_trues)
+        mismatch = sign_match < 0
+        mismatch_ratio = np.mean(mismatch)
+
+        wrong_mag = np.abs(v_preds[mismatch])
+        avg_wrong_mag = np.mean(wrong_mag) if len(wrong_mag) > 0 else 0.0
+
+        threshold = 0.01
+        severe_mask = mismatch & (np.abs(v_preds) > threshold)
+        severe_ratio = np.mean(severe_mask)
+
+        mean_sign_prod = np.mean(v_preds * v_trues)
+
+        norm_sign_err = np.sum(np.abs(v_preds - v_trues)[mismatch]) / (np.sum(np.abs(v_trues)) + 1e-8)
+
+        # 记录到 history
+        history['epoch'].append(epoch + 1)
+        history['train_loss'].append(avg_train_loss)
+        history['val_loss'].append(avg_val_loss)
+        history['lr'].append(current_lr)
+        history['val_sign_err_item'].append(mismatch_ratio)
+        history['val_avg_wrong_mag'].append(avg_wrong_mag)
+        history['val_severe_sign_err'].append(severe_ratio)
+        history['val_mean_sign_prod'].append(mean_sign_prod)
+        history['val_norm_sign_err'].append(norm_sign_err)
+        history['train_recon_loss'].append(current_recon)
+
+        epoch_end = time.time()
+        print(f"    Epoch {epoch + 1}: Train Loss={avg_train_loss:.6f}, Val Loss={avg_val_loss:.6f}, "
+              f"SignErr={mismatch_ratio:.1%} | AvgWrongMag={avg_wrong_mag:.4f} | "
+              f"Severe={severe_ratio:.1%} | MeanProd={mean_sign_prod:.4f} | "
+              f"NormErr={norm_sign_err:.1%}, Time={epoch_end - epoch_start:.1f}s")
+
+
 def plot_history(history):
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    axes = axes.flatten()
 
-    ax1.plot(history['epoch'], history['train_loss'], label='Train Loss', color='#1f77b4')
-    ax1.plot(history['epoch'], history['val_loss'], label='Val Loss', color='#ff7f0e')
-    ax1.set_title('Training and Validation Loss')
-    ax1.set_xlabel('Epochs')
-    ax1.set_ylabel('Loss (MSE)')
-    ax1.legend()
-    ax1.grid(True, linestyle=':')
+    # 损失曲线
+    axes[0].plot(history['epoch'], history['train_loss'], label='Train Loss', color='#1f77b4')
+    axes[0].plot(history['epoch'], history['val_loss'], label='Val Loss', color='#ff7f0e')
+    axes[0].set_title('Training and Validation Loss')
+    axes[0].set_xlabel('Epochs')
+    axes[0].set_ylabel('Loss')
+    axes[0].legend()
+    axes[0].grid(True, linestyle=':')
 
-    ax2.plot(history['epoch'], history['lr'], label='Learning Rate', color='orange')
-    ax2.set_title('Learning Rate Schedule (OneCycleLR)')
-    ax2.set_xlabel('Epochs')
-    ax2.set_ylabel('Learning Rate')
-    ax2.legend()
-    ax2.grid(True, linestyle=':')
+    # LR
+    axes[1].plot(history['epoch'], history['lr'], label='Learning Rate', color='orange')
+    axes[1].set_title('Learning Rate Schedule')
+    axes[1].set_xlabel('Epochs')
+    axes[1].set_ylabel('LR')
+    axes[1].legend()
+    axes[1].grid(True, linestyle=':')
 
-    ax3.plot(history['epoch'], history['val_sign_err_item'], label='Val Sign Error Ratio', color='red', linewidth=2.5)
-    ax3.set_title('Validation Sign Error Ratio')
-    ax3.set_xlabel('Epochs')
-    ax3.set_ylabel('Sign Error Ratio')
-    ax3.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.1%}'))
-    ax3.legend()
-    ax3.grid(True, linestyle=':')
+    # Sign Error Ratio 
+    axes[2].plot(history['epoch'], history['val_sign_err_item'], label='Sign Error Ratio', color='red', lw=2.5)
+    axes[2].plot(history['epoch'], history['val_severe_sign_err'], label='Severe Sign Error (>0.01)', color='#d62728', lw=2.5, linestyle='--')
+    axes[2].set_title('Sign Error Ratio')
+    axes[2].set_xlabel('Epochs')
+    axes[2].set_ylabel('Ratio')
+    axes[2].yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.1%}'))
+    axes[2].legend()
+    axes[2].grid(True, linestyle=':')
 
-    plt.suptitle('Zernike Coefficient Training Progress', fontsize=16, y=1.02)
+    # Avg Wrong Magnitude（核心新指标）
+    axes[3].plot(history['epoch'], history['val_avg_wrong_mag'], label='Avg Wrong Magnitude', color='#9467bd', lw=2.5)
+    axes[3].set_title('Average Magnitude of Sign-Wrong Predictions')
+    axes[3].set_xlabel('Epochs')
+    axes[3].set_ylabel('Magnitude (lower is not always better)')
+    axes[3].legend()
+    axes[3].grid(True, linestyle=':')
+
+    # Mean Sign Product（全局符号一致性）
+    axes[4].plot(history['epoch'], history['val_mean_sign_prod'], label='Mean Sign Product', color='#2ca02c', lw=2.5)
+    axes[4].set_title('Mean Sign Product (higher = better)')
+    axes[4].set_xlabel('Epochs')
+    axes[4].set_ylabel('Product')
+    axes[4].legend()
+    axes[4].grid(True, linestyle=':')
+
+    # Normalized Sign Error Contribution
+    axes[5].plot(history['epoch'], history['val_norm_sign_err'], label='Norm Sign Error Contribution', color='#ff7f0e', lw=2.5)
+    axes[5].set_title('Normalized Sign Error Contribution to Total Error')
+    axes[5].set_xlabel('Epochs')
+    axes[5].set_ylabel('Ratio')
+    axes[5].yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.1%}'))
+    axes[5].legend()
+    axes[5].grid(True, linestyle=':')
+
+    plt.suptitle('Zernike Coefficient Training Progress (with Sign Margin Loss)', fontsize=16, y=1.02)
     plt.tight_layout()
     plt.savefig('./results/training_curves.png', dpi=300, bbox_inches='tight')
     plt.show()
+    print("    ✅ 已生成 training_curves.png（包含 AvgWrongMag、SevereSignErr 等指标）")
+
+
 
 
 if __name__ == "__main__":
