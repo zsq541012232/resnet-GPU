@@ -2,7 +2,7 @@ import torch
 import torch.optim as optim
 from tqdm import tqdm
 from data_utils import split_dataset, get_indices_from_dir, ZernikeDataset, ZernikeDatasetFixed3Channel
-from model import (ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss,
+from model import (ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss, SignMarginLoss,
                    ZernikeSiameseViTAttnResRoPE)
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -35,7 +35,7 @@ def train():
     prefixes = ["imgIF", "imgPoDF"]   # 当前使用的两个通道
 
     # ==================== Cycle Consistency ====================
-    use_cycle_loss = True
+    use_cycle_loss = False
     cycle_lambda = 0.05          # 可调，建议 0.01~0.1
     generative_weight_path = './weights/generative_best.pth'
 
@@ -161,6 +161,7 @@ def train():
                 val_all_trues.append(targets.cpu().numpy())
 
         avg_val_loss = val_running_loss / len(val_loader)
+        current_lr = scheduler.get_last_lr()[0]
 
         # 符号一致性评估
         # ==================== 新指标计算 ====================

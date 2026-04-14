@@ -9,6 +9,14 @@ from PIL import Image
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 
+class Log1pTransform:
+    """代替 Lambda(lambda x: torch.log1p(x))，支持多进程"""
+    def __call__(self, x):
+        return torch.log1p(x)
+    
+    def __repr__(self):
+        return "Log1pTransform()"
+
 
 def split_dataset(data_dir, test_size=0.1, val_size=0.1):
     print(">>> [Step 1] Scanning directory for CSV files...")
@@ -47,9 +55,7 @@ class ZernikeDataset(Dataset):
             transforms.ToTensor(),                     # PIL/np → [0,1] float tensor
         ]
         if self.use_log_preprocess:
-            transform_list.append(
-                transforms.Lambda(lambda x: torch.log1p(x))  # log(1 + x)，防止 log(0) 并增强动态范围
-            )
+            transform_list.append(Log1pTransform())
         transform_list.append(
             transforms.Resize((224, 224), antialias=True)
         )
@@ -90,9 +96,7 @@ class ZernikeDatasetFixed3Channel(Dataset):
             transforms.ToTensor(),
         ]
         if self.use_log_preprocess:
-            transform_list.append(
-                transforms.Lambda(lambda x: torch.log1p(x))   # log(1 + x) 预处理
-            )
+            transform_list.append(Log1pTransform())
         transform_list.append(
             transforms.Resize((224, 224), antialias=True)
         )

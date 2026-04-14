@@ -5,7 +5,7 @@ import os
 import numpy as np
 from PIL import Image
 from torchvision import transforms
-from data_utils import load_zernike_coeffs   # 复用你已有的函数
+from data_utils import load_zernike_coeffs, Log1pTransform   # 复用你已有的函数
 
 
 class ZernikeInverseDataset(Dataset):
@@ -17,7 +17,7 @@ class ZernikeInverseDataset(Dataset):
 
         self.transform = transforms.Compose([
             transforms.ToTensor(),                    # (H, W) -> (1, H, W)
-            transforms.Lambda(lambda x: torch.log1p(x)),
+            Log1pTransform(),
             transforms.Resize((224, 224), antialias=True),
         ])
 
