@@ -165,55 +165,7 @@ def train():
         # 符号一致性评估
         
 
-# ====================== model.py 修改（完整新 Loss 类）======================
-# 请将 model.py 中原有的 SignWeightedMSELoss 类 **完整替换** 为下面这个新类
-# （其他代码保持不变）
-
-class SignMarginLoss(nn.Module):
-    """
-    改进版符号一致性 Loss（推荐替换旧 SignWeightedMSELoss）。
-    核心：当 pred * target < margin 时给予强惩罚，防止模型缩到 0。
-    同时保留 MSE 主损失，并可与 cycle consistency 完美结合。
-    """
-    def __init__(self, mse_weight=1.0, margin=0.05, sign_penalty=8.0):
-        super().__init__()
-        self.mse = nn.MSELoss(reduction='none')
-        self.mse_weight = mse_weight
-        self.margin = margin                  # 关键超参：鼓励置信度（建议 0.01~0.1）
-        self.sign_penalty = sign_penalty      # 符号惩罚强度
-
-    def forward(self, pred, target):
-        base_mse = self.mse(pred, target)
-
-        # 符号乘积（>0 表示符号一致）
-        prod = pred * target
-        # margin hinge 惩罚：只有 prod < margin 时才惩罚（持续梯度）
-        sign_loss = torch.relu(self.margin - prod) * self.sign_penalty
-
-        loss = self.mse_weight * base_mse + sign_loss
-        return torch.mean(loss)
-# ====================== train.py 完整修改片段 ======================
-# 1. 文件顶部 import 保持不变（已包含 generative_model）
-
-# 2. 在 --- 1. 参数配置 --- 后增加/修改以下参数
-    # ==================== 新增/修改：Cycle + 新 Loss ====================
-    use_cycle_loss = True
-    cycle_lambda = 0.05
-    generative_weight_path = './weights/generative_best.pth'
-
-    # 新 Loss 超参（可根据验证曲线微调）
-    margin = 0.05
-    sign_penalty = 8.0
-
-# 3. 在 --- 3. 模型与损失函数初始化 --- 中 **替换 criterion**
-    print(">>> Initializing ZernikeSiameseViTAttnResRoPE...")
-
-    if use_fixed_3channel:
-        raise NotImplementedError("3通道模式暂未适配 Siamese 模型")
-    else:
-        model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
-
-    # === 替换为新 Loss ===
+ ===
     criterion = SignMarginLoss(mse_weight=1.0, margin=margin, sign_penalty=sign_penalty).to(device)
     print(f"    ✅ 已使用 SignMarginLoss（margin={margin}, penalty={sign_penalty}）")
 
