@@ -108,8 +108,19 @@ def test_and_plot():
     imgs_np = np.concatenate(all_imgs, axis=0)  # (N, C, H, W)
 
     # 符号一致性计算
-    sign_mismatch = (np.sign(true_np) * np.sign(pred_np)) < 0
-    ratio_item_err = np.sum(sign_mismatch) / sign_mismatch.size
+    sign_match = np.sign(true_np) * np.sign(pred_np)
+    mismatch = sign_match < 0
+    ratio_item_err = np.mean(mismatch)
+
+    wrong_mag = np.abs(pred_np[mismatch])
+    avg_wrong_mag = np.mean(wrong_mag) if len(wrong_mag) > 0 else 0.0
+
+    threshold = 0.01
+    severe_mask = mismatch & (np.abs(pred_np) > threshold)
+    severe_ratio = np.mean(severe_mask)
+
+    mean_sign_prod = np.mean(pred_np * true_np)
+    norm_sign_err = np.sum(np.abs(pred_np - true_np)[mismatch]) / (np.sum(np.abs(true_np)) + 1e-8)
 
     # --- 4. 核心计算、数据保存与汇总报告 ---
     sample_data_list = []
@@ -132,6 +143,8 @@ def test_and_plot():
         row['Sample_MSE'] = s_mse
         row['Sample_R2'] = s_r2
         row['Sign_Error_Count'] = s_sign_errors
+        row['Avg_Wrong_Mag'] = np.mean(np.abs(pred_np[i][mismatch[i]])) if np.any(mismatch[i]) else 0.0
+        row['Severe_Sign_Err'] = np.mean(severe_mask[i])
         row['Inference_Latency_sec'] = s_latency
         sample_data_list.append(row)
 
@@ -144,13 +157,17 @@ def test_and_plot():
 
     # 生成并保存测试总结报告
     summary_text = (
-        "================ 评估报告 ================\n"
+        "================ 评估报告 (SignMarginLoss) ================\n"
         f"测试样本总数: {len(test_idx)}\n"
         f"平均 MSE: {avg_sample_mse:.6f}\n"
         f"平均 R2 : {avg_sample_r2:.6f}\n"
-        f"所有系数中符号错误的比例: {ratio_item_err:.2%}\n"
+        f"符号错误比例: {ratio_item_err:.2%}\n"
+        f"Avg Wrong Magnitude: {avg_wrong_mag:.4f}\n"
+        f"严重符号错误 (>0.01): {severe_ratio:.2%}\n"
+        f"Mean Sign Product: {mean_sign_prod:.4f}\n"
+        f"Norm Sign Error Contribution: {norm_sign_err:.2%}\n"
         f"平均单样本推理时延: {avg_latency_ms:.2f} ms\n"
-        "========================================\n"
+        "==================================================\n"
     )
 
     print(f"\n{summary_text}")
@@ -192,8 +209,6 @@ def test_and_plot():
     ax.fill_between([0,max_val],0, max_val, color=correct_sign_color, alpha=0.5)
     # 第三象限: X<0, Y<0
     ax.fill_between([min_val,0],min_val, 0, color=correct_sign_color, alpha=0.5)
-
-
 
 
     # 绘制散点，稍微调小点并增加透明度以应对数据量大的情况
