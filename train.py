@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import time
 import os
 import numpy as np
+from generative_model import ZernikeToPSFGenerator   
 
 torch.backends.cudnn.benchmark = True
 
@@ -32,6 +33,11 @@ def train():
     batch_size = 32
 
     prefixes = ["imgIF", "imgPoDF"]   # 当前使用的两个通道
+
+    # ==================== Cycle Consistency ====================
+    use_cycle_loss = True
+    cycle_lambda = 0.05          # 可调，建议 0.01~0.1
+    generative_weight_path = './weights/generative_best.pth'
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f">>> Using Device: {device} | Modes: {num_modes}")
@@ -63,6 +69,22 @@ def train():
     else:
         model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
 
+    # 加载预训练生成式模型（冻结）
+    gen_model = None
+    if use_cycle_loss:
+        gen_model = ZernikeToPSFGenerator(num_modes=num_modes).to(device)
+        if os.path.exists(generative_weight_path):
+            gen_model.load_state_dict(torch.load(generative_weight_path, map_location=device))
+            print(f">>> 成功加载生成式模型: {generative_weight_path}")
+        else:
+            print(">>> Warning: 未找到生成式模型权重，cycle loss 将被禁用")
+            use_cycle_loss = False
+        # 冻结生成式模型
+        for param in gen_model.parameters():
+            param.requires_grad = False
+        gen_model.eval()
+        print("    ✅ 生成式模型已冻结，用于 cycle consistency")
+
     # 仅使用 SignWeightedMSELoss（已移除物理重构 Loss）
     sign_penalty = 10.0
     criterion = SignWeightedMSELoss(penalty_weight=sign_penalty).to(device)
@@ -76,7 +98,7 @@ def train():
 
     # 训练记录
     history = {'epoch': [], 'train_loss': [], 'val_loss': [], 'lr': [],
-               'val_sign_err_item': []}
+               'val_sign_err_item': [], 'train_recon_loss': []}   
 
     print(">>> Starting GPU training loop...")
     for epoch in range(epochs):
@@ -90,15 +112,26 @@ def train():
         for imgs, targets in pbar:
             imgs, targets = imgs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
             optimizer.zero_grad()
-            outputs = model(imgs)
-            loss = criterion(outputs, targets)          # 不再传入 imgs
+            outputs = model(imgs)                    # pred_zernike
+
+            loss_main = criterion(outputs, targets)
+
+            if use_cycle_loss:
+                real_if = imgs[:, 0:1, :, :]         # 第0通道就是 imgIF（已log1p）
+                gen_if = gen_model(outputs)          # 用预测的z生成图像
+                recon_loss = nn.MSELoss()(gen_if, real_if)
+                loss = loss_main + cycle_lambda * recon_loss
+                current_recon = recon_loss.item()
+            else:
+                loss = loss_main
+                current_recon = 0.0
+
             loss.backward()
             optimizer.step()
             scheduler.step()
 
             train_running_loss += loss.item()
-            current_lr = optimizer.param_groups[0]['lr']
-            pbar.set_postfix(loss=loss.item(), lr=f"{current_lr:.2e}")
+            pbar.set_postfix(loss=loss.item(), recon=current_recon if use_cycle_loss else 0)
 
         avg_train_loss = train_running_loss / len(train_loader)
 
@@ -131,6 +164,7 @@ def train():
         history['val_loss'].append(avg_val_loss)
         history['lr'].append(current_lr)
         history['val_sign_err_item'].append(item_error_ratio)
+        history['train_recon_loss'].append(current_recon if use_cycle_loss else 0.0)
 
         epoch_end = time.time()
         print(f"    Epoch {epoch + 1}: Train Loss={avg_train_loss:.6f}, Val Loss={avg_val_loss:.6f}, "
