@@ -156,7 +156,7 @@ class CBAM(nn.Module):
         return out
 
 
-# ====================== 真正的Twin/Siamese结构 ======================
+# ====================== Twin/Siamese结构 ======================
 class SiameseEncoder(nn.Module):
     def __init__(self, in_channels=1, patch_size=16, embed_dim=384, depth=10, num_heads=6, block_size=4):
         super().__init__()
@@ -219,7 +219,88 @@ class ZernikeSiameseViTAttnResRoPE(nn.Module):
         return self.head(fused)
 
 
-# ====================== 其他模型（保持原样） ======================
+
+
+# ====================== Siamese ResNet + CBAM ======================
+class ResNetCBAMEncoder(nn.Module):
+    """可复用的单通道 ResNet34 + CBAM 编码器（权重共享）"""
+    def __init__(self, weight_path=None):
+        super().__init__()
+        resnet = models.resnet34(weights=None)
+        
+        # 加载你原来的预训练权重（ResNet34）
+        if weight_path and os.path.exists(weight_path):
+            try:
+                checkpoint = torch.load(weight_path, weights_only=False)
+                resnet.load_state_dict(checkpoint)
+                print(f"    ✅ Successfully loaded ResNet34 weights from {weight_path}")
+            except Exception as e:
+                print(f"    ⚠️  Error loading weights: {str(e)}. Training from scratch.")
+        
+        # 强制改为单通道输入（imgIF / imgPoDF 各一个通道）
+        resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        nn.init.kaiming_normal_(resnet.conv1.weight, mode='fan_out', nonlinearity='relu')
+        print("    Adjusted conv1 for 1 input channel (Siamese mode).")
+
+        self.features = nn.Sequential(
+            resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool,
+            resnet.layer1, CBAM(64),
+            resnet.layer2, CBAM(128),
+            resnet.layer3, CBAM(256),
+            resnet.layer4, CBAM(512)
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+    def forward(self, x):
+        # x: [B, 1, H, W]
+        x = self.features(x)
+        x = self.avgpool(x)
+        return torch.flatten(x, 1)  # [B, 512]
+
+
+class ZernikeSiameseResNetCBAM(nn.Module):
+    """
+    Siamese ResNet34 + CBAM
+    - 输入必须是 2 通道（imgIF + imgPoDF）
+    - 共享权重 + 高层融合，更适合相位多样性任务
+    """
+    def __init__(self, num_outputs=35, weight_path=None):
+        super().__init__()
+        self.encoder = ResNetCBAMEncoder(weight_path=weight_path)
+        
+        # 高层融合模块（比简单 concat 更强）
+        self.fusion = nn.Sequential(
+            nn.Linear(512 * 2, 1024),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 512),
+            nn.GELU(),
+            nn.Dropout(0.1),
+        )
+        self.head = nn.Linear(512, num_outputs)
+        
+        print("    ✅ ZernikeSiameseResNetCBAM 初始化完成（Siamese + ResNet34 + CBAM + 高层融合）")
+
+    def forward(self, x):
+        # x: [B, 2, H, W]
+        if x.shape[1] != 2:
+            raise ValueError("ZernikeSiameseResNetCBAM 要求输入正好 2 个通道 (imgIF + imgPoDF)")
+        
+        img_if = x[:, 0:1, :, :]   # [B, 1, H, W]
+        img_podf = x[:, 1:2, :, :] # [B, 1, H, W]
+        
+        feat_if = self.encoder(img_if)
+        feat_podf = self.encoder(img_podf)
+        
+        fused = torch.cat([feat_if, feat_podf], dim=1)  # [B, 1024]
+        fused = self.fusion(fused)
+        
+        return self.head(fused)
+
+
+
+
+# ==========================================
 class ZernikeNet(nn.Module):
     def __init__(self, num_outputs, in_channels=3, weight_path=None):
         super(ZernikeNet, self).__init__()
@@ -254,6 +335,105 @@ class ZernikeNet(nn.Module):
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         return self.fc(x)
+
+
+
+
+
+class ZernikeDualCrossNet(nn.Module):
+    """
+    双流交叉融合 ResNet + CBAM 架构
+    专门针对焦面 (IF) 与离焦面 (PoDF) 的物理特性设计
+    """
+    def __init__(self, num_outputs, weight_path=None):
+        super(ZernikeDualCrossNet, self).__init__()
+        
+        # 1. 共享的特征提取主干 (ResNet34)
+        resnet = models.resnet34(weights=None)
+        if weight_path and os.path.exists(weight_path):
+            try:
+                resnet.load_state_dict(torch.load(weight_path, weights_only=False))
+                print(f"    Successfully loaded ResNet34 weights from {weight_path}")
+            except Exception as e:
+                print(f"    Error loading weights: {str(e)}. Training from scratch.")
+        
+        # 将输入层调整为单通道，因为我们将独立处理 imgIF 和 imgPoDF
+        resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        nn.init.kaiming_normal_(resnet.conv1.weight, mode='fan_out', nonlinearity='relu')
+        
+        # 拆分 ResNet 的不同阶段以便进行多尺度融合
+        self.stem = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
+        self.layer1 = nn.Sequential(resnet.layer1, CBAM(64))
+        self.layer2 = nn.Sequential(resnet.layer2, CBAM(128))
+        self.layer3 = nn.Sequential(resnet.layer3, CBAM(256))
+        self.layer4 = nn.Sequential(resnet.layer4, CBAM(512))
+        
+        # 2. 交叉融合模块 (Cross-Fusion Modules)
+        # 用于融合 IF 和 PoDF 在 Layer3 和 Layer4 的特征
+        self.fusion3 = nn.Sequential(
+            nn.Conv2d(256 * 2, 256, kernel_size=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            CBAM(256)
+        )
+        
+        self.fusion4 = nn.Sequential(
+            nn.Conv2d(512 * 2, 512, kernel_size=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            CBAM(512)
+        )
+        
+        # 3. 多尺度预测头 (Multi-scale Prediction Head)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        # 融合 layer3 (256) 和 layer4 (512) 的降维特征
+        self.fc = nn.Sequential(
+            nn.Linear(256 + 512, 512),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, num_outputs)
+        )
+
+    def forward(self, x):
+        # 确保输入是双通道
+        if x.shape[1] != 2:
+            raise ValueError("模型要求输入正好2个通道 (imgIF + imgPoDF)")
+            
+        img_if = x[:, 0:1, :, :]
+        img_podf = x[:, 1:2, :, :]
+        
+        # === 独立特征提取 (Siamese Forward) ===
+        # IF 分支
+        f_if = self.stem(img_if)
+        f_if = self.layer1(f_if)
+        f_if = self.layer2(f_if)
+        l3_if = self.layer3(f_if)
+        l4_if = self.layer4(l3_if)
+        
+        # PoDF 分支
+        f_podf = self.stem(img_podf)
+        f_podf = self.layer1(f_podf)
+        f_podf = self.layer2(f_podf)
+        l3_podf = self.layer3(f_podf)
+        l4_podf = self.layer4(l3_podf)
+        
+        # === 深度交叉融合 (Deep Cross-Fusion) ===
+        # Layer 3 融合 (捕获中阶像差和局部结构)
+        cat_l3 = torch.cat([l3_if, l3_podf], dim=1)
+        fused_l3 = self.fusion3(cat_l3)
+        pool_l3 = torch.flatten(self.avgpool(fused_l3), 1)
+        
+        # Layer 4 融合 (捕获低阶像差和全局位移)
+        cat_l4 = torch.cat([l4_if, l4_podf], dim=1)
+        fused_l4 = self.fusion4(cat_l4)
+        pool_l4 = torch.flatten(self.avgpool(fused_l4), 1)
+        
+        # === 多尺度预测 (Multi-scale Prediction) ===
+        # 结合深层语义和中层细节
+        final_feat = torch.cat([pool_l3, pool_l4], dim=1)
+        out = self.fc(final_feat)
+        
+        return out
 
 
 class ZernikeViT(nn.Module):
