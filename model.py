@@ -60,6 +60,61 @@ class SignMarginShrinkLoss(nn.Module):
         loss = self.mse_weight * base_mse + sign_loss + shrink_loss
         return torch.mean(loss)
 
+
+
+
+
+class ConsistentUnderCorrectLoss(nn.Module):
+    """
+    方向一致 + 不过矫正 Loss
+    
+    核心思想：
+    - 安全区域：
+        - x > 0 且 0 ≤ y ≤ x
+        - x < 0 且 x ≤ y ≤ 0
+      → 仅使用普通 MSE（尽量缩小误差），几乎没有额外惩罚
+    - 其他区域（符号相反 或 同符号但过矫正 |y| > |x|）：
+      → 给予额外强惩罚
+    
+    效果：
+    1. 强制校正方向一致（sign(pred) == sign(target)）
+    2. 同方向时绝不过矫正（|pred| ≤ |target|），避免“矫过头”
+    3. 梯度平滑（全 relu 实现），可与 cycle consistency 完美结合
+    
+    推荐参数：
+    - margin=0.00          # 符号置信度阈值（可调 0.00\~0.1）
+    - sign_penalty=8.0     # 符号错误/信心不足时的惩罚强度
+    - over_weight=3.0      # 过矫正惩罚强度（建议 2.0\~5.0，从 3.0 开始）
+    """
+    def __init__(self, mse_weight=1.0, margin=0.00, sign_penalty=8.0, over_weight=3.0):
+        super().__init__()
+        self.mse = nn.MSELoss(reduction='none')
+        self.mse_weight = mse_weight
+        self.margin = margin
+        self.sign_penalty = sign_penalty
+        self.over_weight = over_weight
+
+    def forward(self, pred, target):
+        base_mse = self.mse(pred, target)
+        prod = pred * target                     # 符号乘积
+        abs_p = torch.abs(pred)
+        abs_t = torch.abs(target)
+
+        # 1. 符号一致性惩罚（prod < margin 时触发）
+        #    包含：符号完全相反 + 同符号但幅度太小（信心不足）
+        sign_loss = torch.relu(self.margin - prod) * self.sign_penalty
+
+        # 2. 过矫正惩罚（任何 |pred| > |target| 都惩罚）
+        #    - 同符号时：直接惩罚“矫过头”
+        #    - 异符号时：额外鼓励把幅度压小（更安全）
+        over_loss = self.over_weight * torch.relu(abs_p - abs_t)
+
+        # 总损失
+        loss = self.mse_weight * base_mse + sign_loss + over_loss
+        return torch.mean(loss)
+
+
+
 class SignWeightedMSELoss(nn.Module):
     """
     兼顾符号一致性与均方误差的新型 Loss。
