@@ -4,7 +4,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
 from data_utils import split_dataset, get_indices_from_dir, ZernikeDataset, ZernikeDatasetFixed3Channel
-from model import ZernikeNet, ZernikeViT, ZernikeEffNet, ZernikeViTAttnResRoPE, ZernikeSiameseViTAttnResRoPE
+from model import ZernikeNet, ZernikeViT, ZernikeEffNet, ZernikeViTAttnResRoPE, ZernikeSiameseViTAttnResRoPE, ZernikeSiameseResNetCBAM, ZernikeDualCrossNet
 import pandas as pd
 import os
 from sklearn.metrics import r2_score, mean_squared_error
@@ -59,6 +59,8 @@ def test_and_plot():
         # model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
         # model = ZernikeEffNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=None).to(device)
         model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels).to(device)
+        # model = ZernikeSiameseResNetCBAM(num_outputs=num_modes).to(device)
+        # model = ZernikeDualCrossNet(num_outputs=num_modes).to(device)
   
 
     model_weight_path = "./weights/model_best.pth"

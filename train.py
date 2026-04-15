@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 from data_utils import split_dataset, get_indices_from_dir, ZernikeDataset, ZernikeDatasetFixed3Channel
-from model import (SignMarginShrinkLoss, ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss, SignMarginLoss,
-                   ZernikeSiameseViTAttnResRoPE)
+from model import (ConsistentUnderCorrectLoss, SignMarginShrinkLoss, ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss, SignMarginLoss,
+                   ZernikeSiameseViTAttnResRoPE, ZernikeSiameseResNetCBAM, ZernikeDualCrossNet)
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
@@ -40,7 +40,7 @@ def train():
     cycle_lambda = 0.05          # 可调，建议 0.01~0.1
     generative_weight_path = './weights/generative_best.pth'
 
-    margin = 0.05
+    margin = 0.00
     sign_penalty = 8.0
     shrink_weight = 3.0    # ← 推荐从 2.0 开始尝试，最高可到 5.0
 
@@ -75,6 +75,8 @@ def train():
         # model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
         # model = ZernikeEffNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=None).to(device)
         model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)
+        # model = ZernikeSiameseResNetCBAM(num_outputs=num_modes, weight_path=weight_path).to(device)
+        # model = ZernikeDualCrossNet(num_outputs=num_modes, weight_path=weight_path).to(device)
 
     # 加载预训练生成式模型（冻结）
     gen_model = None
@@ -92,16 +94,16 @@ def train():
         gen_model.eval()
         print("    ✅ 生成式模型已冻结，用于 cycle consistency")
 
-    criterion = nn.MSELoss().to(device)
-    print("    ✅ 已使用 nn.MSELoss")
+    # criterion = nn.MSELoss().to(device)
+    # print("    ✅ 已使用 nn.MSELoss")
     # criterion = SignWeightedMSELoss(penalty_weight=sign_penalty).to(device)
     # print("    ✅ 已使用 SignWeightedMSELoss（含符号惩罚）")
     # criterion = SignMarginLoss(mse_weight=1.0, margin=margin, sign_penalty=sign_penalty).to(device)
     # print(f"    ✅ 已使用 SignMarginLoss（margin={margin}, penalty={sign_penalty}）")
     # criterion = SignMarginShrinkLoss(mse_weight=1.0,margin=margin, sign_penalty=sign_penalty, shrink_weight=shrink_weight).to(device)
     # print(f"    ✅ 已使用 SignMarginShrinkLoss（margin={margin}, sign_penalty={sign_penalty}, shrink_weight={shrink_weight}）")
-    # criterion = ConsistentUnderCorrectLoss(mse_weight=1.0,margin=0.0,sign_penalty=8.0,over_weight=3.5).to(device)
-    # print(f"    ✅ 已使用 ConsistentUnderCorrectLoss（margin=0.0, sign_penalty=8.0, over_weight=3.5）")
+    criterion = ConsistentUnderCorrectLoss(mse_weight=1.0,margin=0.0,sign_penalty=8.0,over_weight=3.5).to(device)
+    print(f"    ✅ 已使用 ConsistentUnderCorrectLoss（margin=0.0, sign_penalty=8.0, over_weight=3.5）")
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
 
@@ -210,7 +212,7 @@ def train():
               f"NormErr={norm_sign_err:.1%}, Time={epoch_end - epoch_start:.1f}s")
 
 
-        pd.DataFrame(history).to_csv("./logs/training_log.csv", index=False)
+        pd.DataFrame(history).to_csv("./results/training_log.csv", index=False)
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
