@@ -132,6 +132,258 @@ class SignWeightedMSELoss(nn.Module):
         return torch.mean(base_loss * weight)
 
 
+
+
+# ====================== 基于 Laplace 分布的残差对数似然估计损失 ======================
+# Laplace 分布（双指数分布）是 MAE 的最大似然估计形式
+# 特点：
+#   - 比 Gaussian 更鲁棒（重尾特性），适合测量误差场景
+#   - 比 Student-t 更简单、计算更快
+#   - scale 参数控制鲁棒性（scale 越大越鲁棒）
+
+class ResidualLaplaceLogLikelihoodLoss(nn.Module):
+    """
+    基于 Laplace 分布的残差对数似然估计损失（纯版本，无 sign penalty）
+    假设残差服从 Laplace 分布（对测量误差非常友好）
+    
+    参数：
+        scale: 尺度参数（推荐 0.5~2.0，1.0 是良好起点）
+    """
+    def __init__(self, scale: float = 1.0):
+        super().__init__()
+        self.register_buffer('scale', torch.tensor(scale, dtype=torch.float32))
+        print(f"    ✅ ResidualLaplaceLogLikelihoodLoss 初始化完成（scale={scale}）")
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        residual = pred - target
+        abs_res = torch.abs(residual)
+
+        # Laplace log pdf
+        log_prob = -torch.log(2 * self.scale) - abs_res / self.scale
+
+        # 残差对数似然损失 = -mean(log_prob)
+        return -torch.mean(log_prob)
+
+
+class SignWeightedResidualLaplaceLogLikelihoodLoss(nn.Module):
+    """
+    带 sign penalty weight 的 Laplace 残差对数似然估计损失（强烈推荐）
+    在 Laplace 对数似然基础上，当符号相反时对该残差的损失乘以额外权重。
+    
+    效果：
+    - 保留 Laplace 对测量误差的良好鲁棒性
+    - 同时强力惩罚符号错误
+    """
+    def __init__(self, penalty_weight: float = 4.0, scale: float = 1.0):
+        super().__init__()
+        self.penalty_weight = penalty_weight
+        self.register_buffer('scale', torch.tensor(scale, dtype=torch.float32))
+        print(f"    ✅ SignWeightedResidualLaplaceLogLikelihoodLoss 初始化完成（penalty_weight={penalty_weight}, scale={scale}）")
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        residual = pred - target
+        abs_res = torch.abs(residual)
+
+        # Laplace log pdf
+        log_prob = -torch.log(2 * self.scale) - abs_res / self.scale
+
+        # 转成 per-element negative log-likelihood
+        nll = -log_prob
+
+        # 符号惩罚权重
+        sign_match = torch.sign(pred) * torch.sign(target)
+        weight = torch.where(sign_match < 0, self.penalty_weight, 1.0)
+
+        # 加权后的残差对数似然损失
+        weighted_nll = nll * weight
+        return torch.mean(weighted_nll)
+
+
+# ====================== 残差对数似然估计损失（Residual Log-Likelihood Loss）======================
+# 基于 Student-t 分布的残差对数似然（最经典的「残差对数似然估计」实现）
+# 优点：
+#   - 比 MSE/MAE 更鲁棒，能很好容忍测量误差（outlier）
+#   - df 越小越鲁棒（推荐 3.0~5.0）
+#   - 完全不依赖 MSE，直接最小化 -log p(residual | θ)
+
+class ResidualStudentTLogLikelihoodLoss(nn.Module):
+    """
+    残差对数似然估计损失（纯版本，无 sign penalty）
+    假设残差服从 Student-t 分布（重尾分布，对测量误差极度鲁棒）
+    
+    参数：
+        df: 自由度（建议 3.0~5.0，越小越鲁棒；df→∞ 接近高斯/MSE）
+        scale: 尺度参数（建议从 1.0 开始，可根据 Zernike 系数量级微调）
+    """
+    def __init__(self, df: float = 4.0, scale: float = 1.0):
+        super().__init__()
+        self.register_buffer('df', torch.tensor(df, dtype=torch.float32))
+        self.register_buffer('scale', torch.tensor(scale, dtype=torch.float32))
+        print(f"    ✅ ResidualStudentTLogLikelihoodLoss 初始化完成（df={df}, scale={scale}）")
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        residual = pred - target
+
+        # Student-t 分布的对数概率密度（log pdf）
+        log_prob = (
+            torch.lgamma((self.df + 1) / 2)
+            - torch.lgamma(self.df / 2)
+            - 0.5 * torch.log(self.df * torch.pi * self.scale ** 2)
+            - ((self.df + 1) / 2) * torch.log(1 + (residual ** 2) / (self.df * self.scale ** 2))
+        )
+
+        # 残差对数似然损失 = -mean(log_prob)
+        return -torch.mean(log_prob)
+
+
+class SignWeightedResidualStudentTLogLikelihoodLoss(nn.Module):
+    """
+    带 sign penalty weight 的残差对数似然估计损失（强烈推荐）
+    在 Student-t 对数似然基础上，当符号相反时对该残差的损失乘以额外权重。
+    
+    效果：
+    - 保留 Student-t 对测量误差的超强鲁棒性
+    - 同时强力惩罚符号错误（符号一致性优先）
+    """
+    def __init__(self, penalty_weight: float = 4.0, df: float = 4.0, scale: float = 1.0):
+        super().__init__()
+        self.penalty_weight = penalty_weight
+        self.register_buffer('df', torch.tensor(df, dtype=torch.float32))
+        self.register_buffer('scale', torch.tensor(scale, dtype=torch.float32))
+        print(f"    ✅ SignWeightedResidualStudentTLogLikelihoodLoss 初始化完成（penalty_weight={penalty_weight}, df={df}, scale={scale}）")
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        residual = pred - target
+
+        # Student-t log pdf（同上）
+        log_prob = (
+            torch.lgamma((self.df + 1) / 2)
+            - torch.lgamma(self.df / 2)
+            - 0.5 * torch.log(self.df * torch.pi * self.scale ** 2)
+            - ((self.df + 1) / 2) * torch.log(1 + (residual ** 2) / (self.df * self.scale ** 2))
+        )
+
+        # 转成 per-element negative log-likelihood
+        nll = -log_prob
+
+        # 符号惩罚权重（逻辑与 SignWeightedMSELoss 完全一致）
+        sign_match = torch.sign(pred) * torch.sign(target)
+        weight = torch.where(sign_match < 0, self.penalty_weight, 1.0)
+
+        # 加权后的残差对数似然损失
+        weighted_nll = nll * weight
+        return torch.mean(weighted_nll)
+
+
+# ====================== 类似 ConsistentUnderCorrectLoss 的残差对数似然版本 ======================
+# 核心思想完全沿用 ConsistentUnderCorrectLoss 的设计哲学：
+#   - 安全区域（符号一致 且 |pred| ≤ |target|） → 只用残差对数似然基底（几乎无额外惩罚）
+#   - 危险区域（符号相反 或 同符号但过矫正） → 额外强惩罚
+#   - 基底从 MSE 换成真正的「残差对数似然」（Student-t / Laplace）
+#   - 保留 sign_penalty + over_weight 两个可调惩罚强度
+
+class ConsistentUnderCorrectResidualStudentTLogLikelihoodLoss(nn.Module):
+    """
+    类似 ConsistentUnderCorrectLoss 的 Student-t 残差对数似然版本
+    - 基底：Student-t 残差对数似然（对测量误差极度鲁棒）
+    - 额外惩罚：符号不一致 + 过矫正（|pred| > |target|）
+    """
+    def __init__(self, 
+                 base_weight: float = 1.0,
+                 margin: float = 0.00,
+                 sign_penalty: float = 8.0,
+                 over_weight: float = 3.0,
+                 df: float = 4.0,
+                 scale: float = 1.0):
+        super().__init__()
+        self.base_weight = base_weight
+        self.margin = margin
+        self.sign_penalty = sign_penalty
+        self.over_weight = over_weight
+        
+        # Student-t 参数（固定或可学习）
+        self.register_buffer('df', torch.tensor(df, dtype=torch.float32))
+        self.register_buffer('scale', torch.tensor(scale, dtype=torch.float32))
+        
+        print(f"    ✅ ConsistentUnderCorrectResidualStudentTLogLikelihoodLoss 初始化完成 "
+              f"(df={df}, scale={scale}, sign_penalty={sign_penalty}, over_weight={over_weight})")
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        residual = pred - target
+        prod = pred * target
+        abs_p = torch.abs(pred)
+        abs_t = torch.abs(target)
+
+        # === 1. 基底：Student-t 残差对数似然（NLL）===
+        log_prob = (
+            torch.lgamma((self.df + 1) / 2)
+            - torch.lgamma(self.df / 2)
+            - 0.5 * torch.log(self.df * torch.pi * self.scale ** 2)
+            - ((self.df + 1) / 2) * torch.log(1 + (residual ** 2) / (self.df * self.scale ** 2))
+        )
+        base_nll = -log_prob                              # negative log-likelihood
+
+        # === 2. 符号一致性惩罚（与 ConsistentUnderCorrectLoss 完全一致）===
+        sign_loss = torch.relu(self.margin - prod) * self.sign_penalty
+
+        # === 3. 过矫正惩罚（|pred| > |target| 时强惩罚）===
+        over_loss = self.over_weight * torch.relu(abs_p - abs_t)
+
+        # === 总损失 ===
+        loss = self.base_weight * base_nll + sign_loss + over_loss
+        return torch.mean(loss)
+
+
+class ConsistentUnderCorrectResidualLaplaceLogLikelihoodLoss(nn.Module):
+    """
+    类似 ConsistentUnderCorrectLoss 的 Laplace 残差对数似然版本
+    - 基底：Laplace 残差对数似然（计算更快，对中等测量误差非常友好）
+    - 额外惩罚：符号不一致 + 过矫正（|pred| > |target|）
+    """
+    def __init__(self, 
+                 base_weight: float = 1.0,
+                 margin: float = 0.00,
+                 sign_penalty: float = 8.0,
+                 over_weight: float = 3.0,
+                 scale: float = 1.0):
+        super().__init__()
+        self.base_weight = base_weight
+        self.margin = margin
+        self.sign_penalty = sign_penalty
+        self.over_weight = over_weight
+        
+        # Laplace 参数
+        self.register_buffer('scale', torch.tensor(scale, dtype=torch.float32))
+        
+        print(f"    ✅ ConsistentUnderCorrectResidualLaplaceLogLikelihoodLoss 初始化完成 "
+              f"(scale={scale}, sign_penalty={sign_penalty}, over_weight={over_weight})")
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        residual = pred - target
+        prod = pred * target
+        abs_p = torch.abs(pred)
+        abs_t = torch.abs(target)
+
+        # === 1. 基底：Laplace 残差对数似然（NLL）===
+        abs_res = torch.abs(residual)
+        log_prob = -torch.log(2 * self.scale) - abs_res / self.scale
+        base_nll = -log_prob
+
+        # === 2. 符号一致性惩罚 ===
+        sign_loss = torch.relu(self.margin - prod) * self.sign_penalty
+
+        # === 3. 过矫正惩罚 ===
+        over_loss = self.over_weight * torch.relu(abs_p - abs_t)
+
+        # === 总损失 ===
+        loss = self.base_weight * base_nll + sign_loss + over_loss
+        return torch.mean(loss)
+
+
+
+
+
+
 class CBAM(nn.Module):
     def __init__(self, gate_channels, reduction_ratio=16):
         super(CBAM, self).__init__()
