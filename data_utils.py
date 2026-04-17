@@ -56,9 +56,7 @@ class ZernikeDataset(Dataset):
         ]
         if self.use_log_preprocess:
             transform_list.append(Log1pTransform())
-        transform_list.append(
-            transforms.Resize((224, 224), antialias=True)
-        )
+        
 
         self.transform = transforms.Compose(transform_list)
 
@@ -97,9 +95,7 @@ class ZernikeDatasetFixed3Channel(Dataset):
         ]
         if self.use_log_preprocess:
             transform_list.append(Log1pTransform())
-        transform_list.append(
-            transforms.Resize((224, 224), antialias=True)
-        )
+        
 
         self.transform = transforms.Compose(transform_list)
 
