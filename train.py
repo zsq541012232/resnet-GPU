@@ -4,13 +4,15 @@ import torch.optim as optim
 from tqdm import tqdm
 from data_utils import split_dataset, get_indices_from_dir, ZernikeDataset, ZernikeDatasetFixed3Channel
 from model import (ConsistentUnderCorrectLoss, SignMarginShrinkLoss, ZernikeNet, ZernikeViT, ZernikeEffNet, SignWeightedMSELoss, SignMarginLoss,
-                   ZernikeSiameseViTAttnResRoPE, ZernikeSiameseResNetCBAM, ZernikeDualCrossNet)
+                   ZernikeSiameseViTAttnResRoPE, ZernikeSiameseResNetCBAM, ZernikeDualCrossNet, ZernikeUNetMambaDeepFusion, ZernikeFusionMambaPure, 
+                   ZernikeMambaPure, ZernikeUNet)
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
 import os
 import numpy as np
-from generative_model import ZernikeToPSFGenerator   
+from generative_model import ZernikeToPSFGenerator
+import model   
 
 torch.backends.cudnn.benchmark = True
 
@@ -74,9 +76,13 @@ def train():
     else:
         # model = ZernikeSiameseViTAttnResRoPE(num_outputs=num_modes).to(device)
         # model = ZernikeEffNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=None).to(device)
-        model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)
+        # model = ZernikeNet(num_outputs=num_modes, in_channels=model_in_channels, weight_path=weight_path).to(device)
         # model = ZernikeSiameseResNetCBAM(num_outputs=num_modes, weight_path=weight_path).to(device)
         # model = ZernikeDualCrossNet(num_outputs=num_modes, weight_path=weight_path).to(device)
+        model = ZernikeUNet(num_outputs=num_modes, in_channels=model_in_channels).to(device)
+        # model = ZernikeMambaPure(num_outputs=num_modes, in_channels=model_in_channels, img_size=224).to(device)
+        # model = ZernikeFusionMambaPure(num_outputs=num_modes, img_size=224).to(device)
+        # model = ZernikeUNetMambaDeepFusion(num_outputs=num_modes, in_channels=model_in_channels, img_size=224).to(device)
 
     # 加载预训练生成式模型（冻结）
     gen_model = None
@@ -218,21 +224,24 @@ def train():
             best_val_loss = avg_val_loss
             torch.save(model.state_dict(), "./weights/model_best.pth")
 
-    plot_history(history)
+
+    model_name = model.__class__.__name__
+    loss_name = criterion.__class__.__name__
+    plot_history(history, model_name, loss_name)
 
 
 
 
-def plot_history(history):
+def plot_history(history, model_name, loss_name):
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     axes = axes.flatten()
 
     # 损失曲线
     axes[0].plot(history['epoch'], history['train_loss'], label='Train Loss', color='#1f77b4')
     axes[0].plot(history['epoch'], history['val_loss'], label='Val Loss', color='#ff7f0e')
-    axes[0].set_title('Training and Validation Loss')
+    axes[0].set_title('Loss Curve ({loss_name})')
     axes[0].set_xlabel('Epochs')
-    axes[0].set_ylabel('Loss')
+    axes[0].set_ylabel('Loss Value')
     axes[0].legend()
     axes[0].grid(True, linestyle=':')
 
@@ -279,11 +288,13 @@ def plot_history(history):
     axes[5].legend()
     axes[5].grid(True, linestyle=':')
 
-    plt.suptitle('Zernike Coefficient Training Progress (with Sign Margin Loss)', fontsize=16, y=1.02)
+    plt.suptitle(f'Zernike Training: {model_name} | Optimizer: AdamW | Loss: {loss_name}', 
+                 fontsize=16, y=1.02)
     plt.tight_layout()
-    plt.savefig('./results/training_curves.png', dpi=300, bbox_inches='tight')
+    save_path = f'./results/training_curves_{model_name}.png'
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.show()
-    print("    ✅ 已生成 training_curves.png（包含 AvgWrongMag、SevereSignErr 等指标）")
+    print(f"    ✅ 已生成可视化图表: {save_path}")
 
 
 
