@@ -169,7 +169,7 @@ def test_and_plot():
 
     # 生成并保存测试总结报告
     summary_text = (
-        "================ 评估报告 (SignMarginLoss) ================\n"
+        "================ 评估报告 ================\n"
         f"输入通道配置: {prefixes}\n"
         f"测试样本总数: {len(test_idx)}\n"
         f"平均 MSE: {avg_sample_mse:.6f}\n"
