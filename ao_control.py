@@ -7,6 +7,8 @@ Using HCIPy for Dynamic Atmosphere, DM, and Sensor Image Generation.
 import os
 import numpy as np
 import hcipy as hc
+import torch
+from PIL import Image
 from scipy.signal import fftconvolve
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter, PillowWriter
@@ -137,71 +139,100 @@ class DynamicAOEnvironment:
 # 2. 神经网络交互接口 (Neural Network Predictor)
 # =====================================================================
 class WavefrontSensorNN:
-    def __init__(self, model_path=None):
-        """
-        初始化你的神经网络传感器控制组件
-        """
+    def __init__(self, model_path=None, model_class_name="ZernikeUNet", num_modes=35,
+                 in_channels=2, device=None):
+        """兼容 train.py / model.py / data_utils.py 的推理接口。"""
         self.model_path = model_path
         self.has_model = False
-        
+        self.num_modes = num_modes
+        self.in_channels = in_channels
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
         if model_path and os.path.exists(model_path):
-            # 将此处注释解开，写入你的 PyTorch 加载逻辑：
-            # import torch
-            # self.model = YourResNetArchitecture()
-            # self.model.load_state_dict(torch.load(model_path))
-            # self.model.eval()
-            # self.has_model = True
-            print("成功加载训练好的神经网络模型。")
+            from model import ZernikeUNet, ZernikeNet, ZernikeEffNet, ZernikeSiameseResNetCBAM
+
+            model_map = {
+                "ZernikeUNet": lambda: ZernikeUNet(num_outputs=num_modes, in_channels=in_channels),
+                "ZernikeNet": lambda: ZernikeNet(num_outputs=num_modes, in_channels=in_channels, weight_path=None),
+                "ZernikeEffNet": lambda: ZernikeEffNet(num_outputs=num_modes, in_channels=in_channels, weight_path=None),
+                "ZernikeSiameseResNetCBAM": lambda: ZernikeSiameseResNetCBAM(num_outputs=num_modes, weight_path=None),
+            }
+            if model_class_name not in model_map:
+                raise ValueError(f"未知模型类型: {model_class_name}，可选: {list(model_map.keys())}")
+
+            self.model = model_map[model_class_name]().to(self.device)
+            state_dict = torch.load(model_path, map_location=self.device)
+            self.model.load_state_dict(state_dict)
+            self.model.eval()
+            self.has_model = True
+            print(f"成功加载训练好的神经网络模型: {model_class_name} @ {model_path}")
         else:
             print("未加载物理模型，交互时将使用高保真模拟器预测（用于流程验证）。")
 
+    def _preprocess(self, img_infocus, img_defocus):
+        # 与 data_utils.py 一致：ToTensor([0,1]) + log1p
+        stacked = np.stack([img_infocus, img_defocus], axis=-1).astype(np.float32)
+        if stacked.max() > 1.0:
+            stacked = stacked / 255.0
+        x = torch.from_numpy(stacked).permute(2, 0, 1)  # [C,H,W]
+        x = torch.log1p(x).unsqueeze(0).to(self.device) # [1,C,H,W]
+        return x
+
     def predict(self, img_infocus, img_defocus):
-        """
-        输入在焦与离焦图像，输出预测的残差泽尼克系数向量
-        """
-        if self.has_model:
-            # 真实闭环交互的 PyTorch 推理代码示例：
-            # import torch
-            # # 转换成 Tensor 并拼接到 Batch (1, 2, H, W)
-            # t_in = torch.tensor(img_infocus, dtype=torch.float32).unsqueeze(0)
-            # t_de = torch.tensor(img_defocus, dtype=torch.float32).unsqueeze(0)
-            # x = torch.stack([t_in, t_de], dim=1) # 形状 [1, 2, H, W]
-            # with torch.no_grad():
-            #     pred = self.model(x) # 模型预测当前残差
-            # return pred.cpu().numpy()[0]
-            pass
-        else:
-            # 如果没有真实网络，此返回值将被外部的主控制逻辑作为占位参考
+        """输入在焦与离焦图像，输出预测的残差泽尼克系数向量。"""
+        if not self.has_model:
             return None
+
+        x = self._preprocess(img_infocus, img_defocus)
+        with torch.no_grad():
+            pred = self.model(x).detach().cpu().numpy()[0]
+        return pred
 
 
 # =====================================================================
 # 3. 功能一：开环仿真数据收集 (Data Collection)
 # =====================================================================
-def do_data_collection(num_frames=500, save_path="ao_training_data.npz"):
-    """运行开环仿真，收集训练集"""
+def _to_uint8_image(img):
+    img = np.asarray(img, dtype=np.float32)
+    img = np.clip(img, 0, None)
+    vmax = float(img.max())
+    if vmax > 0:
+        img = img / vmax
+    return (img * 255.0).astype(np.uint8)
+
+
+def do_data_collection(num_frames=500, save_path="./dataset/ao_simulated"):
+    """运行开环仿真并导出 train.py / data_utils.py 可直接读取的目录格式。
+
+    输出文件命名：
+      - imgIF{idx}.jpg
+      - imgPoDF{idx}.jpg
+      - Zernike{idx}.csv
+    """
     env = DynamicAOEnvironment(pupil_grid_size=128, num_zernike=15)
-    
-    all_img_infocus = []
-    all_img_defocus = []
-    all_zernike = []
-    
     print("\n>>> [1/2] 开始收集开环仿真数据...")
+    out_dir = save_path
+    os.makedirs(out_dir, exist_ok=True)
     for frame in range(num_frames):
         obs, truth = env.step(dm_commands=None)
-        
-        all_img_infocus.append(obs['img_infocus'])
-        all_img_defocus.append(obs['img_defocus'])
-        all_zernike.append(truth['open_loop_zernike'])
-        
+        idx = frame + 1
+
+        Image.fromarray(_to_uint8_image(obs['img_infocus']), mode='L').save(
+            os.path.join(out_dir, f"imgIF{idx}.jpg")
+        )
+        Image.fromarray(_to_uint8_image(obs['img_defocus']), mode='L').save(
+            os.path.join(out_dir, f"imgPoDF{idx}.jpg")
+        )
+        np.savetxt(
+            os.path.join(out_dir, f"Zernike{idx}.csv"),
+            truth['open_loop_zernike'],
+            delimiter=","
+        )
+
         if (frame + 1) % 100 == 0:
             print(f"    已生成 {frame + 1} / {num_frames} 帧数据...")
-            
-    np.savez(save_path, 
-             img_infocus=np.array(all_img_infocus),
-             img_defocus=np.array(all_img_defocus),
-             zernike=np.array(all_zernike))
-    print(f">>> 数据集生成完毕，成功存盘至: {save_path}\n")
+
+    print(f">>> 数据集生成完毕，目录格式存盘至: {out_dir}\n")
 
 
 # =====================================================================
@@ -271,11 +302,19 @@ def do_closed_loop_verification(nn_sensor, num_steps=120, loop_gain=0.3, video_n
             
             # 2. 交互环节：将环境新生成的观测图像喂给神经网络组件
             pred_residual = nn_sensor.predict(img_in, img_de)
-            
+
             # 流程保护占位
             if pred_residual is None:
                 # 模拟一个带有些许测量迟滞和微弱高斯噪声的闭环收敛过程
                 pred_residual = truth['residual_zernike'] * 0.70 + np.random.normal(0, 0.04, env.num_zernike)
+            else:
+                # 兼容 train.py 默认 35 维输出与当前 AO 环境模式数不一致的情况
+                pred_residual = np.asarray(pred_residual, dtype=np.float64)
+                if pred_residual.shape[0] != env.num_zernike:
+                    if pred_residual.shape[0] > env.num_zernike:
+                        pred_residual = pred_residual[:env.num_zernike]
+                    else:
+                        pred_residual = np.pad(pred_residual, (0, env.num_zernike - pred_residual.shape[0]))
             
             # 3. 实时控制律计算：基于积分控制器（Integral Controller）更新绝对命令
             dm_commands = dm_commands - loop_gain * pred_residual
@@ -315,11 +354,11 @@ def do_closed_loop_verification(nn_sensor, num_steps=120, loop_gain=0.3, video_n
 if __name__ == "__main__":
     # --- 步骤 1：一键导出开环仿真数据（用于训练你的神经网络模型） ---
     # 这会生成用于离线训练的 npz 数据文件，包含输入图像与目标 Zernike 矩阵
-    do_data_collection(num_frames=200, save_path="ao_training_data.npz")
+    do_data_collection(num_frames=200, save_path="./dataset/ao_simulated")
     
     # --- 步骤 2：加载神经网络，开启闭环实时在线验证 ---
     # 在此传入你训练好的网络权重路径（如果没有则使用内部的高保真闭环仿真机制）
-    my_trained_nn = WavefrontSensorNN(model_path="your_model_weights.pth")
+    my_trained_nn = WavefrontSensorNN(model_path="./weights/model_best.pth", model_class_name="ZernikeUNet", num_modes=35, in_channels=2)
     
     # 启动系统闭环，并自动输出包含完整四个维度变化的动态过程视频
     do_closed_loop_verification(nn_sensor=my_trained_nn, num_steps=100, loop_gain=0.3)
